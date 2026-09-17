@@ -1,7 +1,9 @@
+import { getAudioContext, resumeAudioContext } from "./context";
+
 /**
- * All sound in this prototype is synthesised with the Web Audio API so the
- * game has engine/crash/pump audio without needing licensed sample files
- * yet - swap this out for real recordings later without touching gameplay.
+ * Diegetic sound effects (engine drone, impacts, the pump beep) synthesised
+ * with the Web Audio API - no sample files to license yet, swap this out
+ * for real recordings later without touching gameplay code.
  */
 export class SynthAudio {
   private ctx: AudioContext | null = null;
@@ -10,8 +12,9 @@ export class SynthAudio {
   private engineFilter: BiquadFilterNode | null = null;
 
   unlock(): void {
+    resumeAudioContext();
     if (this.ctx) return;
-    this.ctx = new AudioContext();
+    this.ctx = getAudioContext();
     this.startEngine();
   }
 

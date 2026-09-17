@@ -20,5 +20,8 @@ new Phaser.Game({
       debug: false,
     },
   },
+  input: {
+    activePointers: 3,
+  },
   scene: [GameScene],
 });
