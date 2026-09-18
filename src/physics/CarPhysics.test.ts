@@ -247,14 +247,21 @@ describe("friction circle: throttle mid-corner costs lateral grip (not an arbitr
     // Two cars driven through an *identical, deterministic* warmup into a
     // mildly slipping corner, then diverge for exactly one step - isolates
     // the friction circle's effect on that single step instead of letting
-    // 1s+ of accumulated speed change (throttle building speed, which on
-    // its own shrinks the slip *angle* for a given lateral velocity)
-    // swamp the much smaller instantaneous grip-sharing effect.
+    // accumulated speed change (throttle building speed, which on its own
+    // shrinks the slip *angle* for a given lateral velocity, via the
+    // larger `speedEps` denominator in the slip formulas) swamp the much
+    // smaller instantaneous grip-sharing effect. Warms up for under a
+    // second, not several - the RPM/gear-limited Drivetrain (Drivetrain.ts)
+    // delivers much less force once well into a higher gear at speed than
+    // this model's old flat `enginePower` figure did, so by several seconds
+    // in, that same swamping happens even at a fixed one-step comparison;
+    // still-launching-in-1st-gear is where the friction circle's cost is
+    // large relative to the tyres' own grip and clearly dominates.
     function toSlippingState() {
       const car = new CarPhysics();
       const dt = 1 / 60;
-      for (let i = 0; i < 300; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
-      for (let i = 0; i < 10; i++) car.update(dt, { throttle: 0.3, brake: 0, steer: 0.6, handbrake: 0 }, "asphalt");
+      for (let i = 0; i < 40; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+      for (let i = 0; i < 10; i++) car.update(dt, { throttle: 0.3, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
       return car;
     }
     const withThrottle = toSlippingState();
@@ -263,8 +270,8 @@ describe("friction circle: throttle mid-corner costs lateral grip (not an arbitr
     expect(coasting.slipAngle).toBeCloseTo(slipBefore, 6); // same deterministic setup
 
     const dt = 1 / 60;
-    withThrottle.update(dt, { throttle: 1, brake: 0, steer: 0.6, handbrake: 0 }, "asphalt");
-    coasting.update(dt, { throttle: 0, brake: 0, steer: 0.6, handbrake: 0 }, "asphalt");
+    withThrottle.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
+    coasting.update(dt, { throttle: 0, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
 
     const deltaWithThrottle = Math.abs(withThrottle.slipAngle) - Math.abs(slipBefore);
     const deltaCoasting = Math.abs(coasting.slipAngle) - Math.abs(slipBefore);
@@ -310,10 +317,166 @@ describe("braking at a standstill (regression - held brake once made the car cha
       // (drag catching up with the capped force) without masking that.
       expect(car.velocityZ).toBeGreaterThanOrEqual(prevVz - 0.03);
       prevVz = car.velocityZ;
-      if (Math.abs(car.velocityZ) < 0.05) sawNearStop = true;
+      // 0.25, not the tighter 0.05 this used to be: outer-frame samples are
+      // only taken once per dt=1/60 call, but the crossing between "still
+      // decelerating forward" and "now pushing backward" (REST_EPS) can
+      // fall inside one of update()'s internal ~1/120s substeps - the
+      // uncapped reverse push can carry velocityZ from comfortably negative
+      // to comfortably positive within that single outer sample, skipping
+      // right over a narrower window without ever oscillating. This is
+      // sampling granularity, not the original chatter bug (which repeated
+      // every frame, sub-mm each time, not a one-off ~0.1-0.2 m/s crossing).
+      if (Math.abs(car.velocityZ) < 0.25) sawNearStop = true;
       if (car.velocityZ > 0.5) sawReverse = true;
     }
     expect(sawNearStop).toBe(true);
     expect(sawReverse).toBe(true);
+  });
+});
+
+describe("speed-sensitive steering, Ackermann geometry, self-aligning torque", () => {
+  it("reaches (near) full lock at low speed", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 60; i++) car.update(dt, { throttle: 0, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
+    expect(Math.abs(car.wheelAngle)).toBeGreaterThan(car.params.maxSteerAngle * 0.98);
+  });
+
+  it("caps the wheel angle to a much narrower band once up to speed", () => {
+    const slow = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 60; i++) slow.update(dt, { throttle: 0, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
+
+    const fast = new CarPhysics();
+    for (let i = 0; i < 300; i++) fast.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    expect(fast.speedKmh).toBeGreaterThan(40); // comfortably past the curve's 10km/h reference point
+    for (let i = 0; i < 60; i++) fast.update(dt, { throttle: 0, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
+
+    expect(Math.abs(fast.wheelAngle)).toBeLessThan(Math.abs(slow.wheelAngle));
+    expect(Math.abs(fast.wheelAngle)).toBeLessThan(fast.params.maxSteerAngle * 0.8);
+  });
+
+  it("Ackermann: the inner wheel always turns more than the outer one, on both sides", () => {
+    const dt = 1 / 60;
+    const right = new CarPhysics();
+    for (let i = 0; i < 60; i++) right.update(dt, { throttle: 0, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
+    const { left: rightTurnLeft, right: rightTurnRight } = right.ackermannWheelAngles;
+    // Whichever side has the bigger magnitude is the inner wheel for this
+    // turn - it must exceed |wheelAngle| itself, and the other side (outer)
+    // must fall short of it, on both sides of a common turn centre.
+    const [innerR, outerR] = Math.abs(rightTurnLeft) > Math.abs(rightTurnRight) ? [rightTurnLeft, rightTurnRight] : [rightTurnRight, rightTurnLeft];
+    expect(Math.abs(innerR)).toBeGreaterThan(Math.abs(right.wheelAngle));
+    expect(Math.abs(outerR)).toBeLessThan(Math.abs(right.wheelAngle));
+
+    const left = new CarPhysics();
+    for (let i = 0; i < 60; i++) left.update(dt, { throttle: 0, brake: 0, steer: -1, handbrake: 0 }, "asphalt");
+    const { left: leftTurnLeft, right: leftTurnRight } = left.ackermannWheelAngles;
+    const [innerL, outerL] = Math.abs(leftTurnLeft) > Math.abs(leftTurnRight) ? [leftTurnLeft, leftTurnRight] : [leftTurnRight, leftTurnLeft];
+    expect(Math.abs(innerL)).toBeGreaterThan(Math.abs(left.wheelAngle));
+    expect(Math.abs(outerL)).toBeLessThan(Math.abs(left.wheelAngle));
+  });
+
+  it("goes straight (both wheel angles 0) when not steering", () => {
+    const car = new CarPhysics();
+    expect(car.ackermannWheelAngles).toEqual({ left: 0, right: 0 });
+  });
+
+  it("self-aligning torque: mid-drift, the wheel angle biases toward countersteer even with no player steering input", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 300; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    for (let i = 0; i < 40; i++) car.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 1 }, "asphalt");
+    expect(car.isDrifting).toBe(true); // sanity: this manoeuvre actually drifts
+
+    // Player lets go of steer entirely (0) for a few frames while still
+    // drifting - a plain bicycle model would relax straight back toward
+    // wheelAngle=0. This one should instead show a clear, nonzero bias
+    // (the assist), well past ordinary smoothing lag.
+    car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 1 }, "asphalt");
+    expect(Math.abs(car.wheelAngle)).toBeGreaterThan(0.05);
+  });
+});
+
+describe("drivetrain integration (RPM/gear telemetry, stalling, cranking, clutch kick)", () => {
+  it("reports engine RPM and a forward gear while driving normally, never touching the clutch", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 120; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    expect(car.rpm).toBeGreaterThan(0);
+    expect(car.gear).toBeGreaterThanOrEqual(1);
+    expect(car.isStalled).toBe(false);
+  });
+
+  it("never stalls for a caller that never touches the clutch input (backward-compatible automatic mode)", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 120; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    for (let i = 0; i < 180; i++) car.update(dt, { throttle: 0, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    expect(car.isStalled).toBe(false);
+  });
+
+  it("stalls when the clutch is pressed then released at a standstill with no throttle, and reports gear 0", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    car.update(dt, { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, ignition: false }, "asphalt");
+    let stalledAt = -1;
+    for (let i = 0; i < 120; i++) {
+      car.update(dt, { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 1, ignition: false }, "asphalt");
+      if (car.isStalled && stalledAt === -1) stalledAt = i;
+    }
+    expect(stalledAt).toBeGreaterThanOrEqual(0);
+    expect(car.gear).toBe(0);
+  });
+
+  it("blocks every other input while the starter is cranking, and restarts only after the full ignition hold", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    car.update(dt, { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, ignition: false }, "asphalt");
+    for (let i = 0; i < 60; i++) car.update(dt, { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 1, ignition: false }, "asphalt");
+    expect(car.isStalled).toBe(true);
+
+    // Hold the starter while also flooring throttle+steer - none of that
+    // should move the car until the engine actually catches.
+    for (let i = 0; i < 130; i++) {
+      car.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 0, clutch: 0, ignition: true }, "asphalt");
+    }
+    expect(car.isStalled).toBe(false);
+    // Blocked the whole time it was cranking - only the tail end of the
+    // 130 frames (after the engine caught) could have moved it at all, so
+    // total heading swing stays far below what 130 frames of full
+    // throttle+steer would otherwise produce (see the steering-convention
+    // tests above: ~30 frames alone pushes heading well past 0.3 rad).
+    expect(Math.abs(car.heading)).toBeLessThan(0.1);
+  });
+
+  it("clutch kick: dumping the clutch from a big RPM gap gives a much larger one-step speed jump than an equally-timed smooth release", () => {
+    const dt = 1 / 60;
+    function revUp() {
+      const car = new CarPhysics();
+      car.update(dt, { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 0, ignition: false }, "asphalt");
+      for (let i = 0; i < 90; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0, clutch: 0, ignition: false }, "asphalt");
+      return car;
+    }
+    const kicked = revUp();
+    const speedBeforeKick = kicked.speed;
+    kicked.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0, clutch: 1, ignition: false }, "asphalt");
+    const kickJump = kicked.speed - speedBeforeKick;
+
+    const smooth = revUp();
+    const speedBeforeSmooth = smooth.speed;
+    // Barely lets the pedal up - nowhere near the "released" threshold the
+    // kick needs, so no shock fires, just the ordinary slipping-clutch force.
+    smooth.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0, clutch: 0.05, ignition: false }, "asphalt");
+    const smoothJump = smooth.speed - speedBeforeSmooth;
+
+    expect(kickJump).toBeGreaterThan(smoothJump * 5);
+  });
+
+  it("shows gear -1 while backing up under the brake-to-reverse convention", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 180; i++) car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
+    expect(car.velocityZ).toBeGreaterThan(0.5); // confirms it's actually reversing
+    expect(car.gear).toBe(-1);
   });
 });

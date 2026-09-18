@@ -12,7 +12,7 @@ export interface InputSource {
   dispose(): void;
 }
 
-const ZERO_INPUT: CarInput = { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
+const ZERO_INPUT: CarInput = { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 1, ignition: false };
 
 export class InputManager {
   private sources: InputSource[] = [];
@@ -31,6 +31,11 @@ export class InputManager {
         // Strongest-magnitude steer wins, not max() (which would bias right).
         steer: Math.abs(s.steer) > Math.abs(out.steer) ? s.steer : out.steer,
         handbrake: Math.max(out.handbrake, s.handbrake),
+        // 1 = pedal up (released) is the "inactive" end for the clutch,
+        // unlike throttle/brake/handbrake - so the most-pressed source
+        // wins via min(), the same "strongest signal" rule the others use.
+        clutch: Math.min(out.clutch ?? 1, s.clutch ?? 1),
+        ignition: (out.ignition ?? false) || (s.ignition ?? false),
       };
     }
     return out;

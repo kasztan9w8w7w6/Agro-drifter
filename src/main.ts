@@ -112,6 +112,71 @@ function buildRadioButton(onClick: () => void): void {
   document.body.appendChild(btn);
 }
 
+/**
+ * Minimal debug HUD for the drivetrain rebuild (speed, RPM bar, gear) -
+ * plain DOM overlay like the radio button/touch controls, so it stays
+ * crisp regardless of the retro pass's internal render resolution.
+ */
+interface Hud {
+  update(speedKmh: number, rpm: number, gear: number, redlineRpm: number, isStalled: boolean, isCranking: boolean): void;
+}
+
+function buildHud(): Hud {
+  const container = document.createElement("div");
+  Object.assign(container.style, {
+    position: "fixed",
+    top: "14px",
+    right: "14px",
+    padding: "10px 14px",
+    borderRadius: "6px",
+    background: "rgba(20, 18, 16, 0.55)",
+    border: "2px solid rgba(240, 236, 226, 0.5)",
+    color: "#f2eee6",
+    fontFamily: "monospace",
+    fontSize: "13px",
+    lineHeight: "1.5",
+    userSelect: "none",
+    pointerEvents: "none",
+    zIndex: "10",
+    minWidth: "150px",
+  });
+
+  const speedLine = document.createElement("div");
+  const gearLine = document.createElement("div");
+  const rpmLine = document.createElement("div");
+  const rpmBarTrack = document.createElement("div");
+  Object.assign(rpmBarTrack.style, {
+    width: "100%",
+    height: "8px",
+    marginTop: "4px",
+    background: "rgba(240, 236, 226, 0.15)",
+    borderRadius: "4px",
+    overflow: "hidden",
+  });
+  const rpmBarFill = document.createElement("div");
+  Object.assign(rpmBarFill.style, {
+    height: "100%",
+    width: "0%",
+    background: "#5fd35f",
+  });
+  rpmBarTrack.appendChild(rpmBarFill);
+
+  container.append(speedLine, gearLine, rpmLine, rpmBarTrack);
+  document.body.appendChild(container);
+
+  return {
+    update(speedKmh, rpm, gear, redlineRpm, isStalled, isCranking) {
+      speedLine.textContent = `SPEED  ${speedKmh.toFixed(0)} km/h`;
+      const gearLabel = isStalled ? (isCranking ? "CRANK" : "OFF") : gear === -1 ? "R" : gear === 0 ? "N" : String(gear);
+      gearLine.textContent = `GEAR   ${gearLabel}`;
+      rpmLine.textContent = `RPM    ${rpm.toFixed(0)}`;
+      const frac = Math.min(1, rpm / redlineRpm);
+      rpmBarFill.style.width = `${frac * 100}%`;
+      rpmBarFill.style.background = frac > 0.92 ? "#e05a4e" : frac > 0.7 ? "#e0b84e" : "#5fd35f";
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const appEl = document.getElementById("app");
   if (!appEl) throw new Error("#app container missing");
@@ -215,6 +280,7 @@ async function main(): Promise<void> {
     if (e.code === "KeyR") radio.next();
   });
   buildRadioButton(() => radio.next());
+  const hud = buildHud();
 
   const timer = new Timer();
   timer.connect(document); // avoids huge deltas across a tab-switch pause
@@ -253,6 +319,7 @@ async function main(): Promise<void> {
     deerPoi.x = deerNow.x;
     deerPoi.z = deerNow.z;
     minimap.update(physics.x, physics.z, physics.heading);
+    hud.update(physics.speedKmh, physics.rpm, physics.gear, physics.drivetrain.params.redlineRpm, physics.isStalled, physics.isCranking);
 
     retro.render();
   });
