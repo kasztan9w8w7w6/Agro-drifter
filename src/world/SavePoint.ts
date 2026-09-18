@@ -2,7 +2,6 @@ import { BoxGeometry, CanvasTexture, Group, Mesh, MeshBasicMaterial, MeshStandar
 import { RoadCourse } from "./RoadCourse";
 import { saveGame } from "../save";
 import { Palette, toCss } from "../palette";
-import { swapInRealModelWhenReady } from "../assets/AssetLoader";
 
 /**
  * Generic 24h kiosk, not a real chain's branding (brief section 2 legal
@@ -62,16 +61,11 @@ export class SavePoint {
 
     const building = buildKioskBuildingPlaceholder();
     this.object.add(building);
-    // The uploaded kit's own bounding box is ~55m x 12.75m x 30m (a whole
-    // modular street-building set, not one small kiosk) centred at
-    // roughly (0.5, -0.15, -3.56) in its own local space - scaled down to
-    // a roadside-building-sized footprint and recentred so it sits under
-    // the neon sign instead of off to one side.
-    swapInRealModelWhenReady(building, "assets/models/kiosk.glb", 0.2, { x: -0.5, y: 0.15, z: 3.56 });
+    // No real model here - the uploaded "kiosk" .glb turned out to be
+    // modular road-surface tiles (asphalt + painted lane markings, now
+    // used by RoadMesh.ts instead), not a building. Back to the plain
+    // placeholder box this always had before that mix-up.
 
-    // The neon sign is code-generated (brief section 3.4) and stays even
-    // once a real kiosk model swaps in - it's not part of the swappable
-    // `building` container.
     const sign = new Mesh(new PlaneGeometry(3, 1.1), new MeshBasicMaterial({ map: buildNeonSignTexture() }));
     sign.position.set(0, 3.4, 2.52);
     this.object.add(sign);

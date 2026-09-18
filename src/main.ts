@@ -176,14 +176,14 @@ async function main(): Promise<void> {
   // rounds each vertex's projected position to the low-res pixel grid)
   // occasionally rounds every vertex of a small/distant object to the same
   // point, collapsing it to zero area - the car would fully vanish at
-  // specific camera distances. 0.4 fixed that for the car, but real,
-  // finely-detailed tree/road geometry (thin leaf cards, a narrow dashed
-  // centre line) is far more collapse-prone than the car's own chunky
-  // placeholder ever was - at 0.4 it still flickered in and out as the
-  // camera moved. 0.6 gives that thinner geometry enough pixel-grid
-  // resolution to stay stable across a full varied drive while still
-  // reading as a low-res retro look, not a smooth modern one.
-  const retro = await createRetroRenderer(appEl, scene, chaseCamera.camera, 0.6);
+  // specific camera distances. 0.4 fixes that. (A later bump to 0.6 chased
+  // a "flicker" that turned out to be two different, unrelated bugs -
+  // scene.background never being set, and no z-fighting guard on the road/
+  // ground pair - both fixed at the source now, so there's no reason to
+  // pay 0.6's extra GPU cost on top; back to 0.4, especially given the
+  // WebGL2 fallback path this runs on most phones is already slower than
+  // WebGPU proper.)
+  const retro = await createRetroRenderer(appEl, scene, chaseCamera.camera, 0.4);
   retro.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
   retro.setSize(window.innerWidth, window.innerHeight);
   document.body.style.background = toCss(Palette.skyBottom);

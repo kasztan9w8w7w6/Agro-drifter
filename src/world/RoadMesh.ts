@@ -7,19 +7,39 @@ import {
   Matrix4,
   Mesh,
   MeshStandardMaterial,
+  RepeatWrapping,
+  SRGBColorSpace,
+  TextureLoader,
 } from "three/webgpu";
+import { texture as textureNode } from "three/tsl";
 import { RoadCourse } from "./RoadCourse";
 import { Palette } from "../palette";
 
 const SEGMENT_LENGTH = 6;
 
 /**
+ * Real, tileable asphalt photo from the uploaded "polish_g-class_main_road"
+ * kit (its actual contents: modular road-surface tiles with baked-in lane
+ * markings, not a building as first assumed - confirmed by every piece's
+ * own geometry being a few centimetres thick and several metres wide/long,
+ * and by the kit's own texture atlas being labelled "Horizontal (painted
+ * lines) road lines names"). Loaded once and reused for both the road
+ * surface here and repeated by real-world distance, not stretched 0..1
+ * across the whole course - a single 0..1 UV span would smear one tile's
+ * texture across 900m instead of repeating it.
+ */
+const roadTextureLoader = new TextureLoader();
+const asphaltTexture = roadTextureLoader.load("assets/textures/road-asphalt.png");
+asphaltTexture.wrapS = RepeatWrapping;
+asphaltTexture.wrapT = RepeatWrapping;
+asphaltTexture.colorSpace = SRGBColorSpace;
+/** Approximate real-world metres the source texture covers, for repeat tiling. */
+const ASPHALT_TILE_METRES = 6;
+
+/**
  * A single ribbon mesh following the course's curve/width, sampled every
  * `SEGMENT_LENGTH` metres - one merged, static geometry rather than one
  * draw call per segment (section 9's "merge static geometry per chunk").
- * Needs a uv attribute even though nothing samples a texture: the retro
- * pass's vertex shader reads uv() unconditionally, and geometry without one
- * (like `GridHelper`) warns and renders wrong through it.
  */
 export function buildRoadSurfaceMesh(course: RoadCourse): Mesh {
   const samples = Math.max(2, Math.ceil(course.params.length / SEGMENT_LENGTH) + 1);
@@ -29,7 +49,8 @@ export function buildRoadSurfaceMesh(course: RoadCourse): Mesh {
 
   for (let i = 0; i < samples; i++) {
     const z = course.params.length - i * SEGMENT_LENGTH;
-    const half = course.widthAt(z) / 2;
+    const width = course.widthAt(z);
+    const half = width / 2;
     const cx = course.centerXAt(z);
     const leftX = cx - half;
     const rightX = cx + half;
@@ -42,11 +63,14 @@ export function buildRoadSurfaceMesh(course: RoadCourse): Mesh {
     positions[vBase + 4] = 0;
     positions[vBase + 5] = z;
 
+    // Real-world-distance UVs so the tileable texture repeats at a
+    // consistent physical scale instead of stretching one tile over the
+    // whole course length or the whole (varying) road width.
     const uvBase = i * 2 * 2;
-    const v = i / (samples - 1);
+    const v = (i * SEGMENT_LENGTH) / ASPHALT_TILE_METRES;
     uvs[uvBase + 0] = 0;
     uvs[uvBase + 1] = v;
-    uvs[uvBase + 2] = 1;
+    uvs[uvBase + 2] = width / ASPHALT_TILE_METRES;
     uvs[uvBase + 3] = v;
 
     if (i < samples - 1) {
@@ -71,11 +95,18 @@ export function buildRoadSurfaceMesh(course: RoadCourse): Mesh {
   // resolution leaves less depth precision to work with than a normal
   // render at the same distances.
   const material = new MeshStandardMaterial({
-    color: Palette.asphalt,
     polygonOffset: true,
     polygonOffsetFactor: -4,
     polygonOffsetUnits: -4,
   });
+  // Explicit colorNode, not just `.map`: RetroPassNode (the only pass this
+  // game actually renders through) rebuilds every material's colour from
+  // `material.colorNode` when swapping it in for the retro look, falling
+  // back to a flat, untextured colour if that's unset - `.map` alone still
+  // renders correctly through a normal (non-retro) pass, so this only bites
+  // because of how this game specifically renders. Set explicitly so the
+  // retro-passed output can't silently drop the texture regardless.
+  material.colorNode = textureNode(asphaltTexture);
   return new Mesh(geometry, material);
 }
 
