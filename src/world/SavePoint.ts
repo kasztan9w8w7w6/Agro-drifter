@@ -62,7 +62,12 @@ export class SavePoint {
 
     const building = buildKioskBuildingPlaceholder();
     this.object.add(building);
-    swapInRealModelWhenReady(building, "assets/models/kiosk.glb");
+    // The uploaded kit's own bounding box is ~55m x 12.75m x 30m (a whole
+    // modular street-building set, not one small kiosk) centred at
+    // roughly (0.5, -0.15, -3.56) in its own local space - scaled down to
+    // a roadside-building-sized footprint and recentred so it sits under
+    // the neon sign instead of off to one side.
+    swapInRealModelWhenReady(building, "assets/models/kiosk.glb", 0.2, { x: -0.5, y: 0.15, z: 3.56 });
 
     // The neon sign is code-generated (brief section 3.4) and stays even
     // once a real kiosk model swaps in - it's not part of the swappable

@@ -22,6 +22,7 @@ import { loadModel } from "./assets/AssetLoader";
 import { RoadCourse } from "./world/RoadCourse";
 import { buildRoadCenterLine, buildRoadSurfaceMesh } from "./world/RoadMesh";
 import { buildTrees } from "./world/Trees";
+import { buildGrassPatches } from "./world/GrassPatches";
 import { ObstacleField } from "./world/Obstacles";
 import { SavePoint } from "./world/SavePoint";
 import { Radio } from "./audio/Radio";
@@ -128,6 +129,7 @@ async function main(): Promise<void> {
   scene.add(buildRoadSurfaceMesh(course));
   scene.add(buildRoadCenterLine(course));
   scene.add(buildTrees(course));
+  scene.add(buildGrassPatches(course));
 
   const obstacles = new ObstacleField(scene, course);
   const savePoint = new SavePoint(scene, course);
