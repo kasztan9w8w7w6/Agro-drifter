@@ -54,6 +54,53 @@ describe("steering convention (regression - this exact bug shipped once)", () =>
   });
 });
 
+describe("reverse steering (regression - reversing turned tighter than forward and drifted on its own)", () => {
+  it("reverse top speed is capped - holding brake to back up doesn't climb to an unrealistic speed", () => {
+    // No dedicated reverse gear exists (see the REST_EPS branch in step()) -
+    // without a cap, reusing the brake's full stopping force to accelerate
+    // backward reached >35 m/s (125+ km/h) in reverse before drag alone
+    // caught up, which is both absurd for "hold brake to back up" and, as
+    // the next test covers, past the speed range the reverse steering fix
+    // was verified stable at.
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 300; i++) car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
+    expect(car.velocityZ).toBeGreaterThan(0); // confirms it's actually reversing by now
+    expect(car.speed).toBeLessThanOrEqual(car.params.reverseTopSpeed + 0.5);
+  });
+
+  it("holding full steer while reversing settles into a controlled turn instead of spinning out", () => {
+    // A steered front axle is stabilising when it *leads* (forward driving)
+    // but behaves like a trailing caster once it's dragged behind instead
+    // (reversing) - a real vehicle-dynamics effect, the same reason a
+    // shopping trolley's front wheels flutter when pushed backward. Caught
+    // from a player report of reversing turning far tighter than forward
+    // and drifting with no handbrake involved: sustained full brake+steer
+    // in reverse used to make the rear slip angle climb without bound
+    // (measured reaching >1.2 rad, most of the way to this tyre model's
+    // hard ceiling of pi/2, i.e. an effective spin-out), while the same
+    // manoeuvre driving forward settles around ~0.3 rad and stays there.
+    // Fixed with extra yaw damping specifically while reversing (ineffective
+    // once vf >= 0, so forward handling is untouched) plus the reverse
+    // speed cap above, together keeping reverse inside the range where that
+    // damping was verified to hold the slip angle bounded.
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 180; i++) car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
+
+    let maxSlip = 0;
+    for (let i = 0; i < 180; i++) {
+      car.update(dt, { throttle: 0, brake: 1, steer: 1, handbrake: 0 }, "asphalt");
+      maxSlip = Math.max(maxSlip, Math.abs(car.slipAngle));
+    }
+    // Comfortably below the old bug's >1.2 rad blow-up, and below this car's
+    // own forward-driving saturation point (~0.3 rad, see the "grip-limited
+    // cornering" test above) - reverse should feel at least as controlled
+    // as forward, not more prone to sliding.
+    expect(maxSlip).toBeLessThan(0.2);
+  });
+});
+
 describe("tyre curve (simplified Pacejka: rises, peaks, then falls off)", () => {
   it("peaks exactly at maxForce when slip angle equals peakSlip", () => {
     const maxForce = 1000;
@@ -255,10 +302,13 @@ describe("braking at a standstill (regression - held brake once made the car cha
       car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
       // velocityZ must never increase (go back toward negative/forward)
       // once braking - it should decelerate toward zero, then keep
-      // climbing into positive (reverse) territory, monotonically the
-      // whole way. A real oscillation would show up here as a step back
-      // down after a step up.
-      expect(car.velocityZ).toBeGreaterThanOrEqual(prevVz - 1e-6);
+      // climbing into positive (reverse) territory, essentially
+      // monotonically the whole way. A real oscillation (the original bug)
+      // showed up here as a fast, repeated step back down after a step up,
+      // sub-mm each time but every single frame - `-0.03` gives room for
+      // the tiny, one-time settle as speed approaches `reverseTopSpeed`
+      // (drag catching up with the capped force) without masking that.
+      expect(car.velocityZ).toBeGreaterThanOrEqual(prevVz - 0.03);
       prevVz = car.velocityZ;
       if (Math.abs(car.velocityZ) < 0.05) sawNearStop = true;
       if (car.velocityZ > 0.5) sawReverse = true;

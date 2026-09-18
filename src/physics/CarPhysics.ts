@@ -78,6 +78,8 @@ export interface CarPhysicsParams {
   weightTransferMax: number;
   driftSlipThreshold: number;
   minDriftSpeed: number;
+  /** m/s cap on how fast holding brake-to-reverse can push the car backward. */
+  reverseTopSpeed: number;
   surfaceGrip: Record<Surface, number>;
 }
 
@@ -114,6 +116,10 @@ export const DEFAULT_CAR_PHYSICS_PARAMS: CarPhysicsParams = {
   // beyond it (see CarPhysics.test.ts for the measured numbers this sits between).
   driftSlipThreshold: 0.05,
   minDriftSpeed: 3,
+  // ~50 km/h - generous for backing up, and comfortably inside the speed
+  // range the reverse yaw-damping boost above is tuned against (see the
+  // comment on `reverseYawDampingBoost` in step()).
+  reverseTopSpeed: 14,
   surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6, glass: 0.4 },
 };
 
@@ -260,11 +266,25 @@ export class CarPhysics {
     // negative, not settle at zero - clamping it there silently disabled
     // reversing entirely.
     const REST_EPS = 0.05;
+    // Tracked separately from `brakeAndRollForce` for the weight-transfer
+    // estimate below: only counts force that's actually *decelerating*
+    // forward motion (real braking - nose dives, weight to front, same as
+    // any car). Reverse propulsion deliberately does NOT feed that estimate
+    // - see the comment below, by its use.
+    let brakeDecelForce = 0;
     if (input.brake > 0) {
       if (vf > REST_EPS) {
         const maxStoppingForce = (vf * p.mass) / dt;
-        brakeAndRollForce -= Math.min(input.brake * p.brakeForce, maxStoppingForce);
-      } else {
+        brakeDecelForce = -Math.min(input.brake * p.brakeForce, maxStoppingForce);
+        brakeAndRollForce += brakeDecelForce;
+      } else if (-vf < p.reverseTopSpeed) {
+        // Reversing has no gear of its own, so without a cap the brake's
+        // full stopping force (calibrated for shedding highway speed
+        // quickly) keeps accelerating the car backward indefinitely - drag
+        // alone doesn't rein it in until well over 100 km/h in reverse,
+        // way past anything a player expects "hold brake to back up" to
+        // do, and also past the speed range the reverse yaw-damping fix
+        // below was tuned and verified against.
         brakeAndRollForce -= input.brake * p.brakeForce;
       }
     }
@@ -273,7 +293,19 @@ export class CarPhysics {
     const wheelBase = p.cgToFront + p.cgToRear;
     const staticNf = (p.mass * p.gravity * p.cgToRear) / wheelBase;
     const staticNr = (p.mass * p.gravity * p.cgToFront) / wheelBase;
-    const longAccelEstimate = (engineForce + brakeAndRollForce) / p.mass;
+    // Reverse propulsion (the `vf <= REST_EPS` branch above) is excluded
+    // here on purpose: it reuses the same numeric force as full braking
+    // (see the comment above `REST_EPS`), so treating it the same as real
+    // braking made the weight-transfer maths read "hard braking" and dump
+    // ~40% of the rear axle's normal load onto the front every time the
+    // player just held brake to reverse - a stationary or slow-reversing
+    // car doesn't nose-dive like that. Losing that much rear grip is what
+    // let the rear tyres blow straight past their peak slip angle from a
+    // tiny steering input, which is what made reversing turn far tighter
+    // than driving forward and drift with no handbrake involved. Forward
+    // acceleration and real forward-motion braking still transfer weight
+    // exactly as before - only reverse propulsion is now weight-neutral.
+    const longAccelEstimate = (engineForce + brakeDecelForce) / p.mass;
     const transferForce = clamp(
       p.mass * longAccelEstimate * p.weightTransferStrength,
       -p.weightTransferMax * staticNf,
@@ -286,9 +318,21 @@ export class CarPhysics {
     const frontMaxForce = p.muFront * Nf * gripMul;
     const rearMaxForce = p.muRear * Nr * gripMul * handbrakeMul;
 
+    // Magnitude-only denominator (`speedEps`, not signed `vf`) so each
+    // tyre's slip angle stays a function of "how much is it scrubbing
+    // sideways relative to how fast it's rolling", which is symmetric in
+    // forward/reverse - the tyre doesn't care which way it's rolling, only
+    // how much it's sliding sideways while doing so, same as a shopping
+    // cart wheel rolls straight either direction until pushed sideways.
+    // (Using signed vf instead would swing the slip angle out toward
+    // +-pi/2 whenever reversing, which the tyre curve below reads as "way
+    // past peakSlip" and collapses to near-zero force - the opposite of
+    // what a sliding tyre should do.) No steer-direction or `dirSign`
+    // correction needed here either: `this.steerAngle` is the wheel's
+    // actual physical angle relative to the body, unaffected by which way
+    // the car happens to be travelling.
     const speedEps = Math.abs(vf) + 0.4;
-    const dirSign = vf < 0 ? -1 : 1;
-    const frontSlip = dirSign * this.steerAngle - Math.atan2(vs + this.yawRate * p.cgToFront, speedEps);
+    const frontSlip = this.steerAngle - Math.atan2(vs + this.yawRate * p.cgToFront, speedEps);
     const rearSlip = -Math.atan2(vs - this.yawRate * p.cgToRear, speedEps);
 
     const frontLatForce = tireLateralForce(frontSlip, frontMaxForce, p.frontPeakSlip);
@@ -314,7 +358,25 @@ export class CarPhysics {
     // the original `yawRate *= 0.985` form loses ~60%/s at 60fps but only
     // ~26%/s at 20fps (same class of FPS-dependence bug as the steering
     // blend above, just easier to miss since nothing clamps it to 1).
-    this.yawRate *= Math.exp(-p.yawDampingRate * dt);
+    // Reversing with the front (steered) axle now trailing rather than
+    // leading is a real vehicle-dynamics effect, not a formula bug: a
+    // steered axle is self-centring/stabilising when it *leads* (forward
+    // driving) but behaves like a trailing caster when it's dragged behind
+    // instead - the same reason a shopping trolley's front wheels flutter
+    // when backed up, or a reversing trailer needs constant correction.
+    // Measured here (see CarPhysics.test.ts): holding the same steer input
+    // at a matched speed, coasting with zero other forces, rear slip angle
+    // climbs without settling in reverse while it saturates around 0.3 rad
+    // forward - confirmed present even with the slip-angle formulas above
+    // made fully direction-symmetric and weight transfer neutralised for
+    // reverse (see `brakeDecelForce` above), so it isn't an artefact of
+    // either of those. Real reverse gearing keeps this in check by simply
+    // not letting a car reverse anywhere near as fast as it drives forward
+    // (see `reverseTopSpeed`); this extra damping, active only while
+    // vf < 0, is the yaw-side equivalent - it doesn't touch forward
+    // handling at all (boost is exactly 1 there).
+    const reverseYawDampingBoost = vf < 0 ? 4 : 1;
+    this.yawRate *= Math.exp(-p.yawDampingRate * reverseYawDampingBoost * dt);
 
     // Drag acts on total speed, not just the forward component, so a car
     // sliding sideways still bleeds speed instead of coasting forever.

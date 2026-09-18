@@ -60,6 +60,23 @@ export function buildGrassPatches(course: RoadCourse, count = 350): Group {
 
   void loadInstanceGeometries("assets/models/grass.glb").then((meshes) => {
     const real = meshes.map(({ geometry, material }) => {
+      // Tufts sit at world Y=0, only 2cm above the ground plane (Y=-0.02,
+      // see buildGround in main.ts) - deliberately not coplanar, but at this
+      // camera's near/far (0.1/400, see ChaseCamera.ts) the depth buffer's
+      // precision is heavily skewed toward *close* distances, so by the
+      // time grass a few dozen metres out is on screen, that 2cm real-world
+      // gap can land inside a single depth-buffer bucket: same class of
+      // z-fighting as the road/centerline/glass-decal cases (RoadMesh.ts,
+      // Obstacles.ts), just distance-triggered instead of always-on - which
+      // matches it showing up specifically while driving past grass at
+      // range, not just at rest. Same fix: bias it toward the camera at the
+      // GPU level rather than trying to widen the Y gap (which would risk
+      // floating tufts above visibly-sloped ground elsewhere on the course).
+      for (const mat of Array.isArray(material) ? material : [material]) {
+        mat.polygonOffset = true;
+        mat.polygonOffsetFactor = -4;
+        mat.polygonOffsetUnits = -4;
+      }
       const instanced = new InstancedMesh(geometry, material, count);
       instanced.instanceMatrix.setUsage(DynamicDrawUsage);
       applyPlacements(instanced, placements, REAL_GRASS_BASE_SCALE);
