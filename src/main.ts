@@ -18,64 +18,95 @@ import { InputManager } from "./input/InputManager";
 import { KeyboardInput } from "./input/KeyboardInput";
 import { TouchInput } from "./input/TouchInput";
 import { Palette, toCss } from "./palette";
+import { loadModel } from "./assets/AssetLoader";
+import { RoadCourse } from "./world/RoadCourse";
+import { buildRoadCenterLine, buildRoadSurfaceMesh } from "./world/RoadMesh";
+import { buildTrees } from "./world/Trees";
+import { ObstacleField } from "./world/Obstacles";
+import { SavePoint } from "./world/SavePoint";
+import { Radio } from "./audio/Radio";
 
-// Session 1 scope: prove the render pipeline + chase camera + 3D-ported
-// drift physics + unified input on placeholder geometry, before any real
-// assets or road/world generation land (see AGRO-DRIFTER brief, section 11).
+// Session 2 scope: first playable loop (road, trees, deer, broken glass,
+// one save point, radio) on top of Session 1's render/camera/physics
+// foundation - still placeholder geometry for anything that needs a real
+// downloaded asset (car/trees/deer/kiosk), per README's asset manifest.
 
-function buildPlaceholderCar(): Group {
+function buildCarPlaceholder(): Group {
   const group = new Group();
 
-  const body = new Mesh(
-    new BoxGeometry(1.7, 1, 3.8),
-    new MeshStandardMaterial({ color: Palette.carBody }),
-  );
+  const body = new Mesh(new BoxGeometry(1.7, 1, 3.8), new MeshStandardMaterial({ color: Palette.carBody }));
   body.position.y = 0.55;
   group.add(body);
 
-  const nose = new Mesh(
-    new BoxGeometry(1.1, 0.6, 0.6),
-    new MeshStandardMaterial({ color: Palette.carGlass }),
-  );
+  const nose = new Mesh(new BoxGeometry(1.1, 0.6, 0.6), new MeshStandardMaterial({ color: Palette.carGlass }));
   nose.position.set(0, 0.65, -2.1); // heading 0 = -Z (Three.js convention), so the nose marks "front"
   group.add(nose);
 
   return group;
 }
 
-function buildGround(scene: Scene): void {
-  // A plain mesh (not GridHelper) - the retro pass rewrites materials assuming
-  // UV'd mesh geometry, which line-segment helpers don't have.
+function buildGround(scene: Scene, course: RoadCourse): void {
+  // Z extent must cover the whole course (plus margin) - it's rotated from
+  // a plane whose "height" axis becomes world Z, easy to under-size if you
+  // think of it as ground "around" the car instead of "under the course".
+  const margin = 300;
   const ground = new Mesh(
-    new PlaneGeometry(400, 400),
+    new PlaneGeometry(800, course.params.length + margin * 2),
     new MeshStandardMaterial({ color: Palette.grassMid }),
   );
   ground.rotation.x = -Math.PI / 2;
+  ground.position.set(0, -0.02, course.params.length / 2); // just under the road ribbon, avoids z-fighting
   scene.add(ground);
+}
 
-  // Thin cross-hatched strips as a motion/scale reference on the otherwise
-  // featureless plane (still ordinary meshes, so they stay retro-pass safe).
-  const lineMat = new MeshStandardMaterial({ color: Palette.roadLine });
-  for (let i = -190; i <= 190; i += 20) {
-    const stripX = new Mesh(new BoxGeometry(400, 0.05, 0.4), lineMat);
-    stripX.position.set(0, 0.01, i);
-    scene.add(stripX);
-    const stripZ = new Mesh(new BoxGeometry(0.4, 0.05, 400), lineMat);
-    stripZ.position.set(i, 0.01, 0);
-    scene.add(stripZ);
+/** Retro-pass resolution "pulse" for FX (a hit glitch, a save-point focus snap) - eases back to base over `durationS`. */
+class RetroPulse {
+  private elapsed = 0;
+  private duration = 0;
+  private from = 0;
+
+  constructor(
+    private readonly base: number,
+    private readonly setScale: (s: number) => void,
+  ) {}
+
+  trigger(target: number, durationS: number): void {
+    this.duration = durationS;
+    this.elapsed = 0;
+    this.from = target;
+  }
+
+  update(dt: number): void {
+    if (this.duration <= 0) return;
+    this.elapsed += dt;
+    const t = Math.min(1, this.elapsed / this.duration);
+    const scale = this.from + (this.base - this.from) * t;
+    this.setScale(scale);
+    if (t >= 1) this.duration = 0;
   }
 }
 
-function buildMarkers(scene: Scene): void {
-  // Scattered boxes so motion/speed reads clearly on a perfectly flat plane.
-  const material = new MeshStandardMaterial({ color: Palette.buildingUnlit });
-  for (let i = 0; i < 40; i++) {
-    const box = new Mesh(new BoxGeometry(1, 2 + Math.random() * 3, 1), material);
-    const angle = Math.random() * Math.PI * 2;
-    const dist = 15 + Math.random() * 150;
-    box.position.set(Math.cos(angle) * dist, box.geometry.parameters.height / 2, Math.sin(angle) * dist);
-    scene.add(box);
-  }
+function buildRadioButton(onClick: () => void): void {
+  const btn = document.createElement("div");
+  btn.textContent = "RADIO";
+  Object.assign(btn.style, {
+    position: "fixed",
+    top: "14px",
+    left: "14px",
+    padding: "8px 14px",
+    borderRadius: "6px",
+    background: "rgba(240, 236, 226, 0.18)",
+    border: "2px solid rgba(240, 236, 226, 0.5)",
+    color: "#f2eee6",
+    fontFamily: "sans-serif",
+    fontSize: "13px",
+    letterSpacing: "0.05em",
+    userSelect: "none",
+    cursor: "pointer",
+    zIndex: "10",
+  });
+  btn.addEventListener("click", onClick);
+  document.body.appendChild(btn);
 }
 
 async function main(): Promise<void> {
@@ -91,10 +122,16 @@ async function main(): Promise<void> {
   sun.position.set(-40, 60, -20);
   scene.add(sun);
 
-  buildGround(scene);
-  buildMarkers(scene);
+  const course = new RoadCourse();
+  buildGround(scene, course);
+  scene.add(buildRoadSurfaceMesh(course));
+  scene.add(buildRoadCenterLine(course));
+  scene.add(buildTrees(course));
 
-  const car = buildPlaceholderCar();
+  const obstacles = new ObstacleField(scene, course);
+  const savePoint = new SavePoint(scene, course);
+
+  const car = await loadModel("assets/models/car.glb", buildCarPlaceholder);
   scene.add(car);
 
   const headlight = new PointLight(Palette.headlightWarm, 8, 20);
@@ -112,11 +149,29 @@ async function main(): Promise<void> {
     retro.setSize(window.innerWidth, window.innerHeight);
   });
 
+  const retroPulse = new RetroPulse(retro.baseRetroScale, (s) => retro.setRetroScale(s));
+
   const physics = new CarPhysics();
+  const spawnZ = course.params.length - 30;
+  physics.setPosition(course.centerXAt(spawnZ), spawnZ, 0);
 
   const input = new InputManager();
   input.add(new KeyboardInput());
   input.add(new TouchInput(appEl));
+
+  const radio = new Radio();
+  const unlockAudio = () => {
+    radio.start();
+    window.removeEventListener("keydown", unlockAudio);
+    window.removeEventListener("pointerdown", unlockAudio);
+  };
+  window.addEventListener("keydown", unlockAudio);
+  window.addEventListener("pointerdown", unlockAudio);
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "KeyR") radio.next();
+  });
+  buildRadioButton(() => radio.next());
 
   const timer = new Timer();
   timer.connect(document); // avoids huge deltas across a tab-switch pause
@@ -126,14 +181,29 @@ async function main(): Promise<void> {
     timer.update();
     const dt = Math.min(timer.getDelta(), MAX_DT);
 
-    physics.update(dt, input.read(), "asphalt");
+    const surface = obstacles.surfaceOverrideAt(physics.x, physics.z) ?? (course.isOnRoad(physics.x, physics.z) ? "asphalt" : "grass");
+    physics.update(dt, input.read(), surface);
+
+    if (obstacles.update(dt, physics)) {
+      retroPulse.trigger(retro.baseRetroScale * 0.45, 0.5); // glitch pulse: chunkier for a beat
+    }
+    if (savePoint.update(physics.x, physics.z)) {
+      retroPulse.trigger(retro.baseRetroScale * 1.8, 1); // focus mode: sharper for a beat
+    }
+    retroPulse.update(dt);
 
     car.position.set(physics.x, 0, physics.z);
     car.rotation.y = physics.heading;
 
     const forwardX = -Math.sin(physics.heading);
     const forwardZ = -Math.cos(physics.heading);
-    chaseCamera.update(dt, car.position, forwardX, forwardZ, physics.speed, physics.slipAngle);
+    chaseCamera.update(dt, car.position, forwardX, forwardZ, physics.velocityX, physics.velocityZ, physics.slipAngle);
+
+    radio.setMood({
+      driving01: Math.min(1, physics.speed / 30),
+      drift01: physics.isDrifting ? 1 : 0,
+      danger01: 0,
+    });
 
     retro.render();
   });

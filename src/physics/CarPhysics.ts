@@ -32,7 +32,7 @@
  *   doesn't leave position and orientation a frame out of sync.
  */
 
-export type Surface = "asphalt" | "gravel" | "mud" | "ice" | "grass";
+export type Surface = "asphalt" | "gravel" | "mud" | "ice" | "grass" | "glass";
 
 export interface CarInput {
   /** 0..1 */
@@ -110,7 +110,7 @@ export const DEFAULT_CAR_PHYSICS_PARAMS: CarPhysicsParams = {
   minDriftSpeed: 3,
   powerOversteerFactor: 0.5,
   powerOversteerSpeedThreshold: 15,
-  surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6 },
+  surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6, glass: 0.4 },
 };
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -150,10 +150,25 @@ export class CarPhysics {
     return this.speed * 3.6;
   }
 
+  /** World-space velocity components (not just heading/speed - differs during a drift). */
+  get velocityX(): number {
+    return this.vx;
+  }
+
+  get velocityZ(): number {
+    return this.vz;
+  }
+
   setPosition(x: number, z: number, heading = this.heading): void {
     this.x = x;
     this.z = z;
     this.heading = heading;
+  }
+
+  /** Scales current velocity (e.g. hitting an obstacle bleeds speed instantly). */
+  applyImpactSpeedScale(scale: number): void {
+    this.vx *= scale;
+    this.vz *= scale;
   }
 
   private axes(heading: number): { fx: number; fz: number; rx: number; rz: number } {

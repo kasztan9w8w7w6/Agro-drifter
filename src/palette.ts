@@ -20,6 +20,9 @@ export const Palette = {
   grassDark: 0x0e2018,
   grassMid: 0x143528,
 
+  treeTrunk: 0x2a1e14,
+  treeCanopy: 0x0f2a1c,
+
   buildingShadow: 0x211d2a,
   buildingLit: 0xffb347,
   buildingUnlit: 0x2a2438,
