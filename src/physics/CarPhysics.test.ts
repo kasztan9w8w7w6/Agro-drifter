@@ -111,6 +111,45 @@ describe("stability under sustained random input", () => {
   });
 });
 
+describe("handbrake kick (instant drift-entry snap)", () => {
+  it("tapping the handbrake while turning immediately registers as drifting - not gradually over several frames", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 120; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    expect(car.isDrifting).toBe(false);
+
+    // First frame the handbrake is pressed while turning: should already count as drifting.
+    car.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 1 }, "asphalt");
+    expect(car.isDrifting).toBe(true);
+  });
+
+  it("does not kick from a near-standstill", () => {
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    car.update(dt, { throttle: 0, brake: 0, steer: 1, handbrake: 1 }, "asphalt");
+    expect(Math.abs(car.heading)).toBeLessThan(0.05);
+  });
+
+  it("only fires on the rising edge, not every frame the handbrake stays held", () => {
+    const withRepeatedPress = new CarPhysics();
+    const heldOnce = new CarPhysics();
+    const dt = 1 / 60;
+    for (const car of [withRepeatedPress, heldOnce]) {
+      for (let i = 0; i < 120; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    }
+    for (let i = 0; i < 10; i++) heldOnce.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 1 }, "asphalt");
+    // Releasing and re-pressing the handbrake every frame would re-trigger the kick each time.
+    for (let i = 0; i < 10; i++) {
+      withRepeatedPress.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 1 }, "asphalt");
+      withRepeatedPress.update(dt, { throttle: 1, brake: 0, steer: 1, handbrake: 0 }, "asphalt");
+    }
+    // Sanity: the repeated-press car got far more kick impulses than the held one, so if
+    // this assertion ever needs loosening it's a sign the edge-detection broke, not that
+    // the exact bound is sacred.
+    expect(Math.abs(withRepeatedPress.heading)).toBeGreaterThan(Math.abs(heldOnce.heading) * 1.3);
+  });
+});
+
 describe("power oversteer (drift without the handbrake)", () => {
   it("throttle + hard steer alone, at speed, breaks rear grip enough to count as drifting", () => {
     const car = new CarPhysics();

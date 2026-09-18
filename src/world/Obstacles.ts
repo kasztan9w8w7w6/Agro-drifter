@@ -104,6 +104,16 @@ export class ObstacleField {
     scene.add(decal);
   }
 
+  /** Current live deer position, for the minimap. */
+  get deerPosition(): { x: number; z: number } {
+    return { x: this.deer.object.position.x, z: this.deer.z };
+  }
+
+  /** Glass zone position(s), for the minimap. */
+  get glassZonePositions(): { x: number; z: number }[] {
+    return this.glassZones.map(({ x, z }) => ({ x, z }));
+  }
+
   /** Returns a surface override (e.g. "glass") when the car is in a hazard zone, or null to fall through to the road/off-road surface. */
   surfaceOverrideAt(x: number, z: number): Surface | null {
     for (const zone of this.glassZones) {

@@ -25,6 +25,7 @@ import { buildTrees } from "./world/Trees";
 import { ObstacleField } from "./world/Obstacles";
 import { SavePoint } from "./world/SavePoint";
 import { Radio } from "./audio/Radio";
+import { Minimap, type MinimapPoi } from "./ui/Minimap";
 
 // Session 2 scope: first playable loop (road, trees, deer, broken glass,
 // one save point, radio) on top of Session 1's render/camera/physics
@@ -131,6 +132,11 @@ async function main(): Promise<void> {
   const obstacles = new ObstacleField(scene, course);
   const savePoint = new SavePoint(scene, course);
 
+  const deerPoi: MinimapPoi = { ...obstacles.deerPosition, color: toCss(Palette.deerFur) };
+  const glassPoi: MinimapPoi = { ...obstacles.glassZonePositions[0], color: toCss(Palette.bottleGlass) };
+  const savePoi: MinimapPoi = { ...savePoint.position, color: toCss(Palette.neonToxic) };
+  const minimap = new Minimap(course, [deerPoi, glassPoi, savePoi], appEl);
+
   const car = await loadModel("assets/models/car.glb", buildCarPlaceholder);
   scene.add(car);
 
@@ -140,7 +146,16 @@ async function main(): Promise<void> {
 
   const chaseCamera = new ChaseCamera(window.innerWidth / window.innerHeight);
 
-  const retro = await createRetroRenderer(appEl, scene, chaseCamera.camera, 0.28);
+  // 0.4, not the brief's suggested 0.28: at 0.28 with the camera pulled back
+  // far enough for a proper chase view, RetroPassNode's vertex-snapping
+  // (it rounds each vertex's projected position to the low-res pixel grid)
+  // occasionally rounds every vertex of a small/distant object to the same
+  // point, collapsing it to zero area - the car would fully vanish at
+  // specific camera distances. Verified: reproduced reliably at
+  // distanceBehind=9/heightAbove=3.6 with scale 0.28 (car invisible for the
+  // entire time it held that position), gone at scale 0.4 with the same
+  // camera settings and across a full varied drive (turns, drift, reverse).
+  const retro = await createRetroRenderer(appEl, scene, chaseCamera.camera, 0.4);
   retro.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
   retro.setSize(window.innerWidth, window.innerHeight);
   document.body.style.background = toCss(Palette.skyBottom);
@@ -204,6 +219,11 @@ async function main(): Promise<void> {
       drift01: physics.isDrifting ? 1 : 0,
       danger01: 0,
     });
+
+    const deerNow = obstacles.deerPosition;
+    deerPoi.x = deerNow.x;
+    deerPoi.z = deerNow.z;
+    minimap.update(physics.x, physics.z, physics.heading);
 
     retro.render();
   });

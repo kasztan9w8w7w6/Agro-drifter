@@ -15,15 +15,21 @@ export interface ChaseCameraParams {
   maxRoll: number;
 }
 
+// Pulled further back/up than the brief's original numbers - arcade
+// racers (Need for Speed, Forza Horizon) deliberately keep the chase cam
+// noticeably farther and higher than a "realistic" bumper-cam distance
+// would suggest, both for readability of what's ahead and because it
+// makes the car look more in-control/planted than a camera glued to the
+// bumper does.
 export const DEFAULT_CHASE_CAMERA_PARAMS: ChaseCameraParams = {
-  distanceBehind: 6,
-  heightAbove: 2.5,
+  distanceBehind: 9,
+  heightAbove: 3.6,
   followRate: 7,
   rotateRate: 3.5,
-  lookAheadDist: 4,
-  baseFov: 60,
-  fovSpeedFactor: 0.03,
-  maxFov: 75,
+  lookAheadDist: 6,
+  baseFov: 64,
+  fovSpeedFactor: 0.035,
+  maxFov: 82,
   maxRoll: (4 * Math.PI) / 180,
 };
 

@@ -75,6 +75,11 @@ export class SavePoint {
   }
 
   /** Returns true the frame a checkpoint save actually happens (for the focus-mode FX pulse). */
+  /** Position, for the minimap. */
+  get position(): { x: number; z: number } {
+    return { x: this.x, z: this.z };
+  }
+
   update(carX: number, carZ: number): boolean {
     if (this.saved) return false;
     const dx = carX - this.x;

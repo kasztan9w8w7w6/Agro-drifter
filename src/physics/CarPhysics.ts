@@ -77,6 +77,17 @@ export interface CarPhysicsParams {
   powerOversteerFactor: number;
   /** Speed (m/s) at which power-oversteer reaches full effect. */
   powerOversteerSpeedThreshold: number;
+  /**
+   * Instant yaw-rate impulse (rad/s) applied the frame the handbrake is
+   * freshly pressed while turning - a discrete "kick" on top of the
+   * continuous grip-loss physics, not derived from it. Real drift/arcade
+   * games (Ridge Racer's drift button, CarX's handbrake) treat drift
+   * initiation as a deliberate snap for feel, not something that should
+   * only emerge gradually from a slip-angle curve.
+   */
+  handbrakeKickYawRate: number;
+  /** Minimum speed (m/s) for the handbrake kick to trigger - no snap from a standstill. */
+  handbrakeKickMinSpeed: number;
   surfaceGrip: Record<Surface, number>;
 }
 
@@ -84,32 +95,43 @@ export const DEFAULT_CAR_PHYSICS_PARAMS: CarPhysicsParams = {
   mass: 1150,
   cgToFront: 1.15,
   cgToRear: 1.35,
-  inertia: 420,
+  // Higher than session 1's 420: that value made yaw so fast/twitchy that
+  // ordinary steering felt nervous rather than weighty - arcade racers
+  // (Forza, NFS) keep everyday steering controlled and let the handbrake
+  // kick (below) supply the snappy drift entry instead of relying on low
+  // inertia everywhere.
+  inertia: 620,
   gravity: 9.81,
   enginePower: 9200,
   brakeForce: 12500,
   dragCoeff: 3.6,
   rollResist: 60,
-  maxSteerAngle: 0.56,
-  steerSpeedFalloff: 0.035,
-  steerResponse: 11,
+  maxSteerAngle: 0.5,
+  steerSpeedFalloff: 0.04,
+  // Slower than session 1's 11: steering angle now ramps in over ~0.15s
+  // instead of snapping in ~0.09s, reads as smooth/progressive rather than
+  // twitchy while still feeling immediate.
+  steerResponse: 7,
   frontStiffness: 13,
   rearStiffness: 9.5,
   muFront: 1.18,
-  muRear: 0.88,
-  handbrakeGripMultiplier: 0.12,
-  yawDampingRate: 0.9,
+  muRear: 0.85,
+  handbrakeGripMultiplier: 0.1,
+  yawDampingRate: 0.85,
   weightTransferStrength: 0.05,
   weightTransferMax: 0.4,
-  // 0.09 rather than a rounder number: measured headroom under the tuned
-  // rear grip/power-oversteer constants above - full-lock steer at speed
-  // alone (no handbrake) peaks at ~0.0975 rad of rear slip, so this is the
-  // highest threshold that still classifies that as a drift, while partial
-  // steering (<=0.7) stays comfortably under it (see CarPhysics.test.ts).
-  driftSlipThreshold: 0.09,
+  // Measured headroom under the tuned rear grip/power-oversteer/inertia
+  // constants above: full-lock steer at speed alone (no handbrake) peaks
+  // at ~0.0575 rad of rear slip (it saturates there regardless of
+  // powerOversteerFactor - the wheelspinLoss cap, not the factor, is what's
+  // binding), while ordinary cornering (steer <= 0.6) stays under 0.035
+  // (see CarPhysics.test.ts).
+  driftSlipThreshold: 0.05,
   minDriftSpeed: 3,
   powerOversteerFactor: 0.5,
   powerOversteerSpeedThreshold: 15,
+  handbrakeKickYawRate: 3.2,
+  handbrakeKickMinSpeed: 3,
   surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6, glass: 0.4 },
 };
 
@@ -133,6 +155,7 @@ export class CarPhysics {
   private vz = 0;
   private yawRate = 0;
   private steerAngle = 0;
+  private prevHandbrake = 0;
 
   /** Rear slip angle from the last step, for drift FX/camera roll. */
   slipAngle = 0;
@@ -193,6 +216,15 @@ export class CarPhysics {
    * well under 0.05 rad.
    */
   update(dt: number, input: CarInput, surface: Surface = "asphalt"): void {
+    const p = this.params;
+    const handbrakeJustPressed = input.handbrake > 0 && this.prevHandbrake <= 0;
+    this.prevHandbrake = input.handbrake;
+    if (handbrakeJustPressed && Math.abs(input.steer) > 0.1 && this.speed > p.handbrakeKickMinSpeed) {
+      // Sign matches -input.steer everywhere else in this file (see the
+      // class-level doc comment on the steering convention).
+      this.yawRate += -Math.sign(input.steer) * p.handbrakeKickYawRate;
+    }
+
     const substeps = Math.max(1, Math.ceil(dt / MAX_SUBSTEP_DT));
     const subDt = dt / substeps;
     for (let i = 0; i < substeps; i++) {
