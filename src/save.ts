@@ -1,8 +1,8 @@
 const SAVE_KEY = "agro-drifter-save";
 
 export interface SaveData {
-  fuel: number;
-  damage: number;
+  /** 0..1, how far along the course the checkpoint was. */
+  progress: number;
   savedAtStation: string;
   timestamp: number;
 }

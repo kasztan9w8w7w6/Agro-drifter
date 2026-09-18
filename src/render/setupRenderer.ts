@@ -6,6 +6,9 @@ export interface RetroRenderer {
   pipeline: RenderPipeline;
   render(): void;
   setSize(width: number, height: number): void;
+  /** Temporarily push the retro pass's internal resolution scale (e.g. a hit "glitch" or a save-point "focus" pulse), independent of the base scale. */
+  setRetroScale(scale: number): void;
+  baseRetroScale: number;
 }
 
 /**
@@ -38,5 +41,7 @@ export async function createRetroRenderer(
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
     },
+    setRetroScale: (scale: number) => pass.setResolutionScale(scale),
+    baseRetroScale: retroScale,
   };
 }

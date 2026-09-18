@@ -1,14 +1,21 @@
 import type { CarInput } from "../physics/CarPhysics";
 import type { InputSource } from "./InputManager";
 
-type ButtonKey = "left" | "right" | "gas" | "brake" | "handbrake";
+type ButtonKey = "left" | "right" | "gas" | "brake" | "handbrake" | "clutch" | "ignition";
 
 const LAYOUT: Record<ButtonKey, { label: string; style: Partial<CSSStyleDeclaration> }> = {
   left: { label: "◀", style: { left: "18px", bottom: "26px" } },
   right: { label: "▶", style: { left: "94px", bottom: "26px" } },
+  // Mirrors "handbrake" on the left side, same row - the other hand's
+  // natural spot for the clutch, same reasoning as Shift vs. Space on
+  // keyboard (see KeyboardInput.ts).
+  clutch: { label: "CLU", style: { left: "18px", bottom: "102px" } },
   handbrake: { label: "HB", style: { right: "18px", bottom: "102px" } },
   brake: { label: "BRK", style: { right: "18px", bottom: "26px" } },
   gas: { label: "GAS", style: { right: "94px", bottom: "26px" } },
+  // Only matters while stalled (hold ~2s to restart) - tucked out of the
+  // way of the driving buttons above it.
+  ignition: { label: "IGN", style: { right: "94px", bottom: "178px" } },
 };
 
 /**
@@ -89,7 +96,7 @@ export class TouchInput implements InputSource {
   }
 
   read(): CarInput {
-    if (!this.active) return { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
+    if (!this.active) return { throttle: 0, brake: 0, steer: 0, handbrake: 0, clutch: 1, ignition: false };
     const left = this.isPressed("left");
     const right = this.isPressed("right");
     return {
@@ -97,6 +104,8 @@ export class TouchInput implements InputSource {
       brake: this.isPressed("brake") ? 1 : 0,
       steer: (right ? 1 : 0) - (left ? 1 : 0),
       handbrake: this.isPressed("handbrake") ? 1 : 0,
+      clutch: this.isPressed("clutch") ? 0 : 1,
+      ignition: this.isPressed("ignition"),
     };
   }
 

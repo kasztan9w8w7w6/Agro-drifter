@@ -1,11 +1,5 @@
 import { getAudioContext, resumeAudioContext } from "./context";
 
-const BPM = 78;
-const SEC_PER_BEAT = 60 / BPM;
-const BEATS_PER_CHORD = 8; // two bars of 4
-const SCHEDULE_AHEAD = 0.12;
-const LOOKAHEAD_MS = 25;
-
 interface ChordDef {
   root: number;
   third: number;
@@ -20,15 +14,6 @@ function buildChord(rootFreq: number, minor: boolean): ChordDef {
   return { root: rootFreq, third: note(rootFreq, minor ? 3 : 4), fifth: note(rootFreq, 7) };
 }
 
-// A minor - F major - C major - G major: a classic melancholic i-VI-III-VII
-// loop, played slow and legato rather than strummed.
-const PROGRESSION: ChordDef[] = [
-  buildChord(110.0, true), // Am
-  buildChord(87.31, false), // F
-  buildChord(130.81, false), // C
-  buildChord(98.0, false), // G
-];
-
 function makeDistortionCurve(amount: number): Float32Array<ArrayBuffer> {
   const n = 44100;
   const curve = new Float32Array(n);
@@ -40,6 +25,66 @@ function makeDistortionCurve(amount: number): Float32Array<ArrayBuffer> {
   return curve;
 }
 
+export interface StationProfile {
+  name: string;
+  bpm: number;
+  progression: ChordDef[];
+  beatsPerChord: number;
+  kickEveryNBeats: number;
+  hihatEveryNBeats: number;
+  padWave: OscillatorType;
+  bassWave: OscillatorType;
+  distortionAmount: number;
+  padFilterBase: number;
+  bassFilterBase: number;
+  padGainBase: number;
+  bassGainBase: number;
+}
+
+/** Melancholic minor-key pad + heavily distorted sub-bass, sparse beat. */
+export const STATION_MELANCHOLY: StationProfile = {
+  name: "Melancholia",
+  bpm: 78,
+  progression: [
+    buildChord(110.0, true), // Am
+    buildChord(87.31, false), // F
+    buildChord(130.81, false), // C
+    buildChord(98.0, false), // G
+  ],
+  beatsPerChord: 8,
+  kickEveryNBeats: 2,
+  hihatEveryNBeats: 0,
+  padWave: "sawtooth",
+  bassWave: "sawtooth",
+  distortionAmount: 220,
+  padFilterBase: 600,
+  bassFilterBase: 400,
+  padGainBase: 0.06,
+  bassGainBase: 0.08,
+};
+
+/** Brighter major-key, faster four-on-the-floor "disco polo"-adjacent station. */
+export const STATION_DISCO: StationProfile = {
+  name: "Disco",
+  bpm: 124,
+  progression: [
+    buildChord(130.81, false), // C
+    buildChord(196.0, false), // G
+    buildChord(110.0, true), // Am
+    buildChord(174.61, false), // F
+  ],
+  beatsPerChord: 4,
+  kickEveryNBeats: 1,
+  hihatEveryNBeats: 2,
+  padWave: "square",
+  bassWave: "square",
+  distortionAmount: 60,
+  padFilterBase: 1400,
+  bassFilterBase: 700,
+  padGainBase: 0.045,
+  bassGainBase: 0.07,
+};
+
 export interface MusicMood {
   driving01: number; // overall energy, roughly current speed ratio
   drift01: number; // how hard we're currently sliding
@@ -47,13 +92,13 @@ export interface MusicMood {
 }
 
 /**
- * A small generative music director: a melancholic minor-key pad loop with
- * a heavily distorted sub-bass underneath, scheduled with a classic
- * look-ahead sequencer so timing stays sample-accurate even if the game's
- * render loop stutters. `setMood` is called every frame with the current
- * driving state and only smoothly nudges gains/filters/detune - it never
- * touches the beat scheduling, so the music keeps its tempo regardless of
- * what's happening on screen.
+ * A small generative music director for one radio station. `setMood` is
+ * called every frame with the current driving state and only smoothly
+ * nudges gains/filters/detune - it never touches the beat scheduling, so
+ * tempo stays locked regardless of what's happening on screen. Multiple
+ * instances (one per station) can run concurrently, each into its own
+ * output gain node, so `Radio` can crossfade between them instead of
+ * hard-cutting on station switch.
  */
 export class MusicDirector {
   private ctx: AudioContext | null = null;
@@ -74,32 +119,34 @@ export class MusicDirector {
   private nextNoteTime = 0;
   private schedulerTimer: number | undefined;
 
-  start(): void {
+  constructor(private profile: StationProfile) {}
+
+  start(outputNode: AudioNode): void {
     resumeAudioContext();
     if (this.started) return;
     this.started = true;
     const ctx = getAudioContext();
     this.ctx = ctx;
+    const p = this.profile;
 
     this.masterGain = ctx.createGain();
-    this.masterGain.gain.setValueAtTime(0, ctx.currentTime);
-    this.masterGain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 2);
-    this.masterGain.connect(ctx.destination);
+    this.masterGain.gain.value = 0.5;
+    this.masterGain.connect(outputNode);
 
     this.padFilter = ctx.createBiquadFilter();
     this.padFilter.type = "lowpass";
-    this.padFilter.frequency.value = 600;
+    this.padFilter.frequency.value = p.padFilterBase;
     this.padGain = ctx.createGain();
-    this.padGain.gain.value = 0.06;
+    this.padGain.gain.value = p.padGainBase;
     this.padFilter.connect(this.padGain);
     this.padGain.connect(this.masterGain);
 
-    const chord = PROGRESSION[0];
+    const chord = p.progression[0];
     const detunes = [-6, 4, 9];
     [chord.root, chord.third, chord.fifth].forEach((freq, i) => {
       const osc = ctx.createOscillator();
-      osc.type = "sawtooth";
-      osc.frequency.value = freq / 2; // pad sits an octave down, melancholic register
+      osc.type = p.padWave;
+      osc.frequency.value = freq / 2; // pad sits an octave down
       osc.detune.value = detunes[i];
       osc.connect(this.padFilter);
       osc.start();
@@ -107,16 +154,16 @@ export class MusicDirector {
     });
 
     const bassShaper = ctx.createWaveShaper();
-    bassShaper.curve = makeDistortionCurve(220);
+    bassShaper.curve = makeDistortionCurve(p.distortionAmount);
     bassShaper.oversample = "4x";
     this.bassFilter = ctx.createBiquadFilter();
     this.bassFilter.type = "lowpass";
-    this.bassFilter.frequency.value = 400;
+    this.bassFilter.frequency.value = p.bassFilterBase;
     this.bassGain = ctx.createGain();
-    this.bassGain.gain.value = 0.08;
+    this.bassGain.gain.value = p.bassGainBase;
 
     this.bassOsc = ctx.createOscillator();
-    this.bassOsc.type = "sawtooth";
+    this.bassOsc.type = p.bassWave;
     this.bassOsc.frequency.value = chord.root / 2;
     this.bassOsc.connect(bassShaper);
     bassShaper.connect(this.bassFilter);
@@ -125,7 +172,7 @@ export class MusicDirector {
     this.bassOsc.start();
 
     this.nextNoteTime = ctx.currentTime + 0.1;
-    this.schedulerTimer = window.setInterval(() => this.scheduler(), LOOKAHEAD_MS);
+    this.schedulerTimer = window.setInterval(() => this.scheduler(), 25);
   }
 
   stop(): void {
@@ -134,38 +181,40 @@ export class MusicDirector {
 
   setMood(mood: MusicMood): void {
     if (!this.started || !this.ctx) return;
+    const p = this.profile;
     const now = this.ctx.currentTime;
     const intensity = Math.min(1, mood.driving01 * 0.6 + mood.drift01 * 0.7);
 
-    this.bassGain.gain.setTargetAtTime(0.08 + intensity * 0.14, now, 0.3);
-    this.bassFilter.frequency.setTargetAtTime(220 + intensity * 900, now, 0.3);
+    this.bassGain.gain.setTargetAtTime(p.bassGainBase + intensity * 0.14, now, 0.3);
+    this.bassFilter.frequency.setTargetAtTime(p.bassFilterBase - 180 + intensity * 900, now, 0.3);
 
-    this.padGain.gain.setTargetAtTime(0.05 + mood.danger01 * 0.06, now, 0.5);
-    this.padFilter.frequency.setTargetAtTime(500 + mood.danger01 * 1200 - intensity * 80, now, 0.5);
+    this.padGain.gain.setTargetAtTime(p.padGainBase - 0.01 + mood.danger01 * 0.06, now, 0.5);
+    this.padFilter.frequency.setTargetAtTime(p.padFilterBase - 100 + mood.danger01 * 1200 - intensity * 80, now, 0.5);
 
-    // Danger detunes the top voice further out of tune for a dissonant,
-    // uneasy beating instead of a clean chord.
     this.padOscs[2]?.detune.setTargetAtTime(9 + mood.danger01 * 22, now, 0.6);
   }
 
   private scheduler(): void {
     if (!this.ctx) return;
-    while (this.nextNoteTime < this.ctx.currentTime + SCHEDULE_AHEAD) {
+    const secPerBeat = 60 / this.profile.bpm;
+    while (this.nextNoteTime < this.ctx.currentTime + 0.12) {
       this.scheduleBeat(this.nextNoteTime);
-      this.nextNoteTime += SEC_PER_BEAT;
+      this.nextNoteTime += secPerBeat;
       this.beatCounter++;
     }
   }
 
   private scheduleBeat(time: number): void {
-    if (this.beatCounter % BEATS_PER_CHORD === 0) {
-      this.chordIndex = (this.chordIndex + 1) % PROGRESSION.length;
-      this.glideToChord(PROGRESSION[this.chordIndex], time);
+    const p = this.profile;
+    if (this.beatCounter % p.beatsPerChord === 0) {
+      this.chordIndex = (this.chordIndex + 1) % p.progression.length;
+      this.glideToChord(p.progression[this.chordIndex], time);
     }
-    // A sparse pulse (skips every other beat) reads as melancholic rather
-    // than a driving four-on-the-floor beat.
-    if (this.beatCounter % 2 === 0) {
+    if (p.kickEveryNBeats > 0 && this.beatCounter % p.kickEveryNBeats === 0) {
       this.scheduleKick(time);
+    }
+    if (p.hihatEveryNBeats > 0 && this.beatCounter % p.hihatEveryNBeats === 0) {
+      this.scheduleHihat(time);
     }
   }
 
@@ -189,5 +238,27 @@ export class MusicDirector {
     gain.connect(this.masterGain);
     osc.start(time);
     osc.stop(time + 0.3);
+  }
+
+  private scheduleHihat(time: number): void {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const bufferSize = ctx.sampleRate * 0.05;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = "highpass";
+    filter.frequency.value = 6000;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.06, time);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    noise.start(time);
+    noise.stop(time + 0.05);
   }
 }

@@ -1,6 +1,6 @@
 /**
- * Arcade drift model (bicycle model with saturating tyre lateral force),
- * ported from a 2D top-down prototype onto the world's XZ plane (Y = up).
+ * Drift model (bicycle model, RWD) ported from a 2D top-down prototype
+ * onto the world's XZ plane (Y = up).
  *
  * Convention: `heading` is the object's `rotation.y` in Three.js's standard
  * right-handed, Y-up world, where an unrotated object's front faces local
@@ -17,22 +17,31 @@
  * by a regression test in `CarPhysics.test.ts` so this can't silently
  * regress again.
  *
- * Tuned and headless-tested for: no NaN/blow-up over long random input
- * runs, the car actually settles (straightens, slows) once
- * throttle/steer/handbrake are released, and the handbrake/power-oversteer
- * drift is actually reachable (not just theoretically present).
+ * Tyre model: each axle's lateral force follows `maxForce * sin(2 *
+ * atan(slip / peakSlip))` - a simplified Pacejka "magic formula" shape
+ * (rises near-linearly from zero, peaks exactly at `peakSlip` with
+ * `maxForce`, then *falls off* beyond it - unlike a plain clamp, which
+ * would plateau at maxForce forever). That falloff is what makes pushing
+ * past the limit actually cost you grip instead of just capping it: the
+ * difference between a forgiving arcade slide and a sim-like one that
+ * punishes overcorrection.
  *
- * Two fixes versus the original 2D pseudocode this was ported from:
- * - Traction loss (rear slip past the drift threshold) now actually reduces
- *   the longitudinal acceleration applied this step, not just a value that
- *   gets discarded before the velocity update.
- * - Heading/yaw is integrated explicitly (yawRate is an angular velocity,
- *   not an angle), and lateral/forward velocity is re-projected onto the
- *   *updated* heading's axes before integrating position, so a fast yaw
- *   doesn't leave position and orientation a frame out of sync.
+ * The driven (rear) axle's longitudinal engine force and its lateral tyre
+ * force share one traction budget (`rearMaxForce`) via a real friction
+ * circle: demanding more of both than the tyre can give scales *both* down
+ * together. That's what makes throttle mid-corner cost you lateral grip
+ * (power oversteer) as a direct physical consequence, not a bolted-on
+ * "wheelspin" formula.
+ *
+ * No scripted "drift kick": drift entry comes entirely from the handbrake
+ * collapsing rear grip (`handbrakeGripMultiplier`) into that same tyre
+ * curve, not from an artificial yaw-rate impulse - real weight transfer,
+ * real slip angles, nothing faked for feel.
  */
 
-export type Surface = "asphalt" | "gravel" | "mud" | "ice" | "grass";
+import { Drivetrain, type DrivetrainParams } from "./Drivetrain";
+
+export type Surface = "asphalt" | "gravel" | "mud" | "ice" | "grass" | "glass";
 
 export interface CarInput {
   /** 0..1 */
@@ -43,6 +52,10 @@ export interface CarInput {
   steer: number;
   /** 0..1 */
   handbrake: number;
+  /** 0 (pedal to the floor, fully disengaged) .. 1 (pedal up, fully engaged) - see Drivetrain.ts. Optional and defaults to 1 (always engaged) so every pre-existing caller/test that predates the clutch stays exactly as it behaved before. */
+  clutch?: number;
+  /** Ignition key held (restarts a stalled engine after `Drivetrain.params.ignitionHoldS`). Optional, defaults to false. */
+  ignition?: boolean;
 }
 
 export interface CarPhysicsParams {
@@ -51,15 +64,24 @@ export interface CarPhysicsParams {
   cgToRear: number;
   inertia: number;
   gravity: number;
-  enginePower: number;
   brakeForce: number;
   dragCoeff: number;
   rollResist: number;
+  /** rad - the hard cap on wheel angle, reached at low speed (see `steerFalloffK`/`steerFalloffC`). */
   maxSteerAngle: number;
-  steerSpeedFalloff: number;
+  /** rad*(km/h) - numerator of the speed-sensitive steering curve `min(maxSteerAngle, steerFalloffK / (speedKmh + steerFalloffC))`. */
+  steerFalloffK: number;
+  /** km/h - denominator offset of that same curve. */
+  steerFalloffC: number;
   steerResponse: number;
-  frontStiffness: number;
-  rearStiffness: number;
+  /** metres - front/rear track width, for the Ackermann virtual-wheel-angle getters (this bicycle model steers a single virtual front wheel; these expose what the left/right wheels *would* be doing for visuals/telemetry). */
+  trackWidth: number;
+  /** How strongly a drift pulls the (target) steer angle toward countersteering the car's own body-slip vector, on top of the player's own input - 0 disables it. */
+  selfAligningStrength: number;
+  /** Slip angle (rad) at which the front tyre's lateral force peaks - past it, grip falls off. */
+  frontPeakSlip: number;
+  /** Same, for the rear tyre - lower than front by design (breaks away first, RWD drift character). */
+  rearPeakSlip: number;
   muFront: number;
   muRear: number;
   handbrakeGripMultiplier: number;
@@ -69,52 +91,78 @@ export interface CarPhysicsParams {
   weightTransferMax: number;
   driftSlipThreshold: number;
   minDriftSpeed: number;
-  /**
-   * How much throttle alone (no handbrake) can break rear grip at speed -
-   * "power oversteer", the RWD-drift-happy feel. 0 = never (FWD-ish,
-   * planted), higher = easier to kick the tail out on gas + steer alone.
-   */
-  powerOversteerFactor: number;
-  /** Speed (m/s) at which power-oversteer reaches full effect. */
-  powerOversteerSpeedThreshold: number;
+  /** m/s cap on how fast holding brake-to-reverse can push the car backward. */
+  reverseTopSpeed: number;
   surfaceGrip: Record<Surface, number>;
 }
 
 export const DEFAULT_CAR_PHYSICS_PARAMS: CarPhysicsParams = {
-  mass: 1150,
-  cgToFront: 1.15,
-  cgToRear: 1.35,
-  inertia: 420,
+  // Fiat 126p ballpark: ~600kg, ~2.02m wheelbase, engine mounted over the
+  // rear axle - cgToRear smaller than cgToFront puts most of the static
+  // weight (staticNr below, ~62%) on the driven rear axle, same rear-engine
+  // weight bias the real car has.
+  mass: 600,
+  cgToFront: 1.25,
+  cgToRear: 0.77,
+  inertia: 300,
   gravity: 9.81,
-  enginePower: 9200,
-  brakeForce: 12500,
+  // Scaled down from this model's original (much heavier, generic-car)
+  // tuning by the same mass ratio (600/1150) - brakeForce/rollResist were
+  // empirically fitted against that mass, and propulsion is no longer a
+  // flat `enginePower` figure here at all (see `Drivetrain.ts`).
+  brakeForce: 6500,
   dragCoeff: 3.6,
-  rollResist: 60,
-  maxSteerAngle: 0.56,
-  steerSpeedFalloff: 0.035,
-  steerResponse: 11,
-  frontStiffness: 13,
-  rearStiffness: 9.5,
+  rollResist: 31,
+  maxSteerAngle: 0.5,
+  // Solved so the curve passes through the brief's two reference points
+  // exactly: full lock (maxSteerAngle=0.5 rad) at 10 km/h, ~12 deg (0.2094
+  // rad) at 100 km/h. 0.5=k/(10+c), 0.2094=k/(100+c) -> c=54.87, k=32.435.
+  steerFalloffK: 32.435,
+  steerFalloffC: 54.87,
+  steerResponse: 7,
+  // ~126p track width.
+  trackWidth: 1.22,
+  selfAligningStrength: 0.4,
+  // ~8.6 deg front / ~6.3 deg rear - real street-tyre slip-angle peaks are
+  // roughly in this range; rear lower than front means the rear steps
+  // past its peak (and starts losing grip) before the front does, which
+  // is what makes this car want to rotate under power/trail-braking
+  // rather than plough straight (understeer) - an RWD drift car's basic
+  // character, produced by the tyre model itself now, not a fudge factor.
+  frontPeakSlip: 0.15,
+  rearPeakSlip: 0.11,
   muFront: 1.18,
-  muRear: 0.88,
-  handbrakeGripMultiplier: 0.12,
-  yawDampingRate: 0.9,
+  muRear: 0.85,
+  handbrakeGripMultiplier: 0.1,
+  yawDampingRate: 0.85,
   weightTransferStrength: 0.05,
   weightTransferMax: 0.4,
-  // 0.09 rather than a rounder number: measured headroom under the tuned
-  // rear grip/power-oversteer constants above - full-lock steer at speed
-  // alone (no handbrake) peaks at ~0.0975 rad of rear slip, so this is the
-  // highest threshold that still classifies that as a drift, while partial
-  // steering (<=0.7) stays comfortably under it (see CarPhysics.test.ts).
-  driftSlipThreshold: 0.09,
+  // Rear slip past this counts as "drifting" (FX/scoring/camera roll) -
+  // comfortably above what ordinary cornering produces, comfortably below
+  // rearPeakSlip so it flags the approach to the limit, not just chaos
+  // beyond it (see CarPhysics.test.ts for the measured numbers this sits between).
+  driftSlipThreshold: 0.05,
   minDriftSpeed: 3,
-  powerOversteerFactor: 0.5,
-  powerOversteerSpeedThreshold: 15,
-  surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6 },
+  // ~50 km/h - generous for backing up, and comfortably inside the speed
+  // range the reverse yaw-damping boost above is tuned against (see the
+  // comment on `reverseYawDampingBoost` in step()).
+  reverseTopSpeed: 14,
+  surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6, glass: 0.4 },
 };
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/**
+ * Simplified Pacejka "magic formula" shape (C=2, E=0): rises from zero,
+ * peaks exactly at `maxForce` when `|slipAngle| == peakSlip`, then falls
+ * off for larger slip - both sin and atan are odd functions, so the sign
+ * of the output always matches the sign of slipAngle without a separate check.
+ */
+export function tireLateralForce(slipAngle: number, maxForce: number, peakSlip: number): number {
+  if (maxForce <= 0) return 0;
+  return maxForce * Math.sin(2 * Math.atan(slipAngle / peakSlip));
 }
 
 /** Upper bound on a single integration step, regardless of the caller's frame rate. */
@@ -134,12 +182,61 @@ export class CarPhysics {
   private yawRate = 0;
   private steerAngle = 0;
 
+  /** Current front (virtual) wheel angle, rad - for telemetry/tests; see `ackermannWheelAngles` for the per-side split. */
+  get wheelAngle(): number {
+    return this.steerAngle;
+  }
+
   /** Rear slip angle from the last step, for drift FX/camera roll. */
   slipAngle = 0;
   isDrifting = false;
 
-  constructor(params: Partial<CarPhysicsParams> = {}) {
+  readonly drivetrain: Drivetrain;
+
+  constructor(params: Partial<CarPhysicsParams> = {}, drivetrainParams: Partial<DrivetrainParams> = {}) {
     this.params = { ...DEFAULT_CAR_PHYSICS_PARAMS, ...params };
+    this.drivetrain = new Drivetrain(drivetrainParams);
+  }
+
+  /** Engine RPM (see `Drivetrain.ts`) - for the HUD. */
+  get rpm(): number {
+    return this.drivetrain.rpm;
+  }
+
+  /** -1 reverse, 0 stalled, 1..N forward gear - for the HUD. */
+  get gear(): number {
+    return this.drivetrain.gear;
+  }
+
+  get isStalled(): boolean {
+    return this.drivetrain.isStalled;
+  }
+
+  /** True while the starter is cranking (ignition held, engine not yet caught) - CarPhysics blocks every other input while this is true, see step(). */
+  get isCranking(): boolean {
+    return this.drivetrain.isCranking;
+  }
+
+  /**
+   * Ackermann steering geometry (rad) for the left/right *virtual* front
+   * wheels this bicycle model doesn't otherwise have (there is no
+   * `RaycastVehicle` here, just one effective steer angle for the whole
+   * front axle - see Drivetrain.ts's class doc comment on why) - exposed
+   * for visuals/telemetry (e.g. animating a real car model's two front
+   * wheel meshes) and for tests. The inner wheel toward the turn always
+   * gets the larger magnitude: with a common turn centre for both wheels,
+   * the inner one is closer to it and so needs the tighter angle.
+   */
+  get ackermannWheelAngles(): { left: number; right: number } {
+    const p = this.params;
+    const wheelBase = p.cgToFront + p.cgToRear;
+    if (Math.abs(this.steerAngle) < 1e-4) return { left: 0, right: 0 };
+    const turnRadius = wheelBase / Math.tan(this.steerAngle);
+    const halfTrack = p.trackWidth / 2;
+    return {
+      left: Math.atan(wheelBase / (turnRadius - halfTrack)),
+      right: Math.atan(wheelBase / (turnRadius + halfTrack)),
+    };
   }
 
   get speed(): number {
@@ -150,10 +247,25 @@ export class CarPhysics {
     return this.speed * 3.6;
   }
 
+  /** World-space velocity components (not just heading/speed - differs during a drift). */
+  get velocityX(): number {
+    return this.vx;
+  }
+
+  get velocityZ(): number {
+    return this.vz;
+  }
+
   setPosition(x: number, z: number, heading = this.heading): void {
     this.x = x;
     this.z = z;
     this.heading = heading;
+  }
+
+  /** Scales current velocity (e.g. hitting an obstacle bleeds speed instantly). */
+  applyImpactSpeedScale(scale: number): void {
+    this.vx *= scale;
+    this.vz *= scale;
   }
 
   private axes(heading: number): { fx: number; fz: number; rx: number; rz: number } {
@@ -172,10 +284,9 @@ export class CarPhysics {
    * depends on force), not a simple exponential-toward-target, so there's
    * no closed form that's exact at any step size the way the steering/yaw
    * damping smoothing is - explicit Euler needs a small enough step here to
-   * stay accurate, especially with this car's low yaw inertia (fast yaw
-   * response = a stiffer system). Verified: without sub-stepping, 20fps vs
-   * 60fps diverged by ~0.7 rad of heading after 2s of steering; with it,
-   * well under 0.05 rad.
+   * stay accurate, especially with this car's yaw response. Verified:
+   * without sub-stepping, 20fps vs 60fps diverged by ~0.7 rad of heading
+   * after 2s of steering; with it, well under 0.05 rad.
    */
   update(dt: number, input: CarInput, surface: Surface = "asphalt"): void {
     const substeps = Math.max(1, Math.ceil(dt / MAX_SUBSTEP_DT));
@@ -192,30 +303,132 @@ export class CarPhysics {
     const { fx, fz, rx, rz } = this.axes(this.heading);
     const vf = this.vx * fx + this.vz * fz; // forward speed
     const vs = this.vx * rx + this.vz * rz; // lateral (rightward) speed
-    const speedNow = Math.hypot(vf, vs);
+
+    // Starter cranking blocks every other input for its duration (spec:
+    // "zablokuj inne wejścia na ten czas") - clutch/ignition themselves are
+    // never blocked, they're what's driving the cranking in the first
+    // place. Checked against *last* step's isCranking, not this step's -
+    // Drivetrain.update() below is what actually flips it, so using this
+    // step's value would let the very frame the engine catches slip a
+    // frame of real input through early.
+    const wasCranking = this.drivetrain.isCranking;
+    const throttle = wasCranking ? 0 : input.throttle;
+    const steer = wasCranking ? 0 : input.steer;
+    const brake = wasCranking ? 0 : input.brake;
+    const handbrake = wasCranking ? 0 : input.handbrake;
+    const clutchInput = clamp(input.clutch ?? 1, 0, 1);
+    const ignitionInput = input.ignition ?? false;
+    // This game has no separate reverse throttle - holding brake while
+    // already stopped (or already rolling backward) is how you reverse,
+    // same one-pedal convention as most arcade racers - see its use below.
+    const REST_EPS = 0.05;
 
     // Steering: relaxes toward a speed-limited target angle. Negated: see
     // the class-level doc comment for why a naive port of the 2D formula
     // turns the car the wrong way in this 3D convention.
-    const speedFactor = 1 / (1 + Math.abs(vf) * p.steerSpeedFalloff);
-    const targetSteer = -input.steer * p.maxSteerAngle * speedFactor;
+    //
+    // Speed-sensitive max lock: `min(maxSteerAngle, k/(speedKmh + c))` -
+    // full lock at low speed, tapering to a much narrower band at speed
+    // (see the constants' own comment for the two reference points this
+    // was solved against), rather than the old `1/(1+|vf|*falloff)` shape.
+    const speedKmh = Math.abs(vf) * 3.6;
+    const maxSteerAtSpeed = Math.min(p.maxSteerAngle, p.steerFalloffK / (speedKmh + p.steerFalloffC));
+    let targetSteer = -steer * maxSteerAtSpeed;
+
+    // Self-aligning torque / countersteer assist: mid-drift (using *last*
+    // step's isDrifting/slipAngle - this step's rear slip isn't known yet,
+    // it depends on this very steerAngle, and a one-substep-old value is
+    // well within this model's own sub-stepping error budget), the front
+    // wheels naturally weathervane toward the car's actual velocity vector
+    // rather than staying wherever the player last put them - the same
+    // caster effect that makes a real car's wheel spin itself back toward
+    // "straight" (here, toward opposite-lock) once the rear steps out.
+    // Blended in on top of the player's own input, not replacing it - the
+    // player still has to catch it, this just gives the wheel a head start.
+    if (this.isDrifting) {
+      const bodySlipEstimate = Math.atan2(vs, Math.abs(vf) + 0.4);
+      const assist = clamp(-bodySlipEstimate * p.selfAligningStrength, -p.maxSteerAngle, p.maxSteerAngle);
+      targetSteer += assist;
+    }
+
     // Exponential-decay smoothing (same form as the chase camera), not the
     // `Math.min(1, dt*rate)` linear approximation the original pseudocode
     // used - that form is FPS-dependent (verified: it produced a ~6x
     // difference in heading after 1s of steering at 20fps vs 60fps).
     this.steerAngle += (targetSteer - this.steerAngle) * (1 - Math.exp(-p.steerResponse * dt));
 
-    // Longitudinal force (engine, brake, rolling resistance) before traction loss.
-    let longForce = 0;
-    if (input.throttle > 0) longForce += input.throttle * p.enginePower;
-    if (input.brake > 0) longForce -= input.brake * p.brakeForce * Math.sign(vf || 1);
-    if (Math.abs(vf) > 0.01) longForce -= p.rollResist * Math.sign(vf);
+    // RWD: propulsion only ever goes through the rear axle (see the
+    // friction circle below), now sourced from the RPM/torque-curve
+    // Drivetrain (Drivetrain.ts) rather than a flat `throttle*enginePower`
+    // figure - can be negative (engine braking) even with the throttle
+    // untouched, which the friction circle below costs lateral grip for
+    // exactly the same reason ordinary braking does. Reverse is NOT driven
+    // through it - see the `reversing` flag and Drivetrain's own class doc
+    // comment for why that stays this file's own, separately-tuned force.
+    const reversing = vf < -REST_EPS;
+    const driveOut = this.drivetrain.update(
+      dt,
+      { throttle, clutch: clutchInput, ignition: ignitionInput, reversing },
+      vf,
+    );
+    const engineForce = driveOut.wheelForce;
+    let brakeAndRollForce = 0;
+    // Brake means two different things depending on vf's sign relative to
+    // the small rest band above: decelerate current forward motion
+    // (REST_EPS < vf), or drive backward (vf <= REST_EPS). Only the
+    // deceleration case gets clamped to "at most enough force to bring vf
+    // to exactly zero this step" - a full, un-clamped brake force applied
+    // for a whole step can overshoot past vf=0 and land on the *other*
+    // side, and since that side used to ALSO try to decelerate (now back
+    // toward 0), it flips back next step, and so on: a fast, tiny
+    // sign-flipping oscillation in vf while held at a standstill
+    // (imperceptible on the car itself, a few mm of position noise per
+    // substep) that the chase camera's velocity-lead look-at target
+    // faithfully amplifies into a visible background shake, and that the
+    // retro pass's vertex snapping turns into flicker on thin/distant
+    // geometry. The reverse case is exempt from that clamp on purpose:
+    // it's *supposed* to keep pushing vf negative, not settle at zero -
+    // clamping it there silently disabled reversing entirely.
+    // Tracked separately from `brakeAndRollForce` for the weight-transfer
+    // estimate below: only counts force that's actually *decelerating*
+    // forward motion (real braking - nose dives, weight to front, same as
+    // any car). Reverse propulsion deliberately does NOT feed that estimate
+    // - see the comment below, by its use.
+    let brakeDecelForce = 0;
+    if (brake > 0) {
+      if (vf > REST_EPS) {
+        const maxStoppingForce = (vf * p.mass) / dt;
+        brakeDecelForce = -Math.min(brake * p.brakeForce, maxStoppingForce);
+        brakeAndRollForce += brakeDecelForce;
+      } else if (-vf < p.reverseTopSpeed) {
+        // Reversing has no gear of its own, so without a cap the brake's
+        // full stopping force (calibrated for shedding highway speed
+        // quickly) keeps accelerating the car backward indefinitely - drag
+        // alone doesn't rein it in until well over 100 km/h in reverse,
+        // way past anything a player expects "hold brake to back up" to
+        // do, and also past the speed range the reverse yaw-damping fix
+        // below was tuned and verified against.
+        brakeAndRollForce -= brake * p.brakeForce;
+      }
+    }
+    if (Math.abs(vf) > 0.01) brakeAndRollForce -= p.rollResist * Math.sign(vf);
 
-    // Weight transfer front/rear from longitudinal accel (pre-traction estimate is fine here).
     const wheelBase = p.cgToFront + p.cgToRear;
     const staticNf = (p.mass * p.gravity * p.cgToRear) / wheelBase;
     const staticNr = (p.mass * p.gravity * p.cgToFront) / wheelBase;
-    const longAccelEstimate = longForce / p.mass;
+    // Reverse propulsion (the `vf <= REST_EPS` branch above) is excluded
+    // here on purpose: it reuses the same numeric force as full braking
+    // (see the comment above `REST_EPS`), so treating it the same as real
+    // braking made the weight-transfer maths read "hard braking" and dump
+    // ~40% of the rear axle's normal load onto the front every time the
+    // player just held brake to reverse - a stationary or slow-reversing
+    // car doesn't nose-dive like that. Losing that much rear grip is what
+    // let the rear tyres blow straight past their peak slip angle from a
+    // tiny steering input, which is what made reversing turn far tighter
+    // than driving forward and drift with no handbrake involved. Forward
+    // acceleration and real forward-motion braking still transfer weight
+    // exactly as before - only reverse propulsion is now weight-neutral.
+    const longAccelEstimate = (engineForce + brakeDecelForce) / p.mass;
     const transferForce = clamp(
       p.mass * longAccelEstimate * p.weightTransferStrength,
       -p.weightTransferMax * staticNf,
@@ -223,33 +436,44 @@ export class CarPhysics {
     );
     const Nf = Math.max(0, staticNf - transferForce);
     const Nr = Math.max(0, staticNr + transferForce);
-    const handbrakeMul = input.handbrake > 0 ? 1 - (1 - p.handbrakeGripMultiplier) * input.handbrake : 1.0;
-
-    const speedEps = Math.abs(vf) + 0.4;
-    const dirSign = vf < 0 ? -1 : 1;
-    const frontSlip = dirSign * this.steerAngle - Math.atan2(vs + this.yawRate * p.cgToFront, speedEps);
-    const rearSlip = -Math.atan2(vs - this.yawRate * p.cgToRear, speedEps);
-
-    const rearSlipExcess = Math.max(0, Math.abs(rearSlip) - p.driftSlipThreshold);
-    const tractionAvailable = input.handbrake > 0 ? 1 : clamp(1 - rearSlipExcess * 3, 0.35, 1);
-    longForce *= tractionAvailable; // actually reduce the force used below, not just a discarded estimate
-    const longAccel = longForce / p.mass;
-
-    // Power oversteer: throttle alone (no handbrake) eats into rear grip as
-    // speed builds, so a car with a high enough powerOversteerFactor can be
-    // kicked into a drift on gas + steer alone, like a real RWD car breaking
-    // rear traction - not just via the handbrake.
-    const throttleRatio = clamp(Math.abs(longForce) / p.enginePower, 0, 1);
-    const oversteerSpeedFactor = clamp(speedNow / p.powerOversteerSpeedThreshold, 0, 1);
-    const wheelspinLoss = clamp(p.powerOversteerFactor * throttleRatio * oversteerSpeedFactor, 0, 0.6);
+    const handbrakeMul = handbrake > 0 ? 1 - (1 - p.handbrakeGripMultiplier) * handbrake : 1.0;
 
     const frontMaxForce = p.muFront * Nf * gripMul;
-    const rearMaxForce = p.muRear * Nr * gripMul * handbrakeMul * (1 - wheelspinLoss);
-    // Force opposes the slip angle (no extra minus: slip is already signed
-    // opposite to the velocity error it's correcting), so this damps the
-    // slide instead of amplifying it.
-    const frontLatForce = clamp(frontSlip * p.frontStiffness * frontMaxForce, -frontMaxForce, frontMaxForce);
-    const rearLatForce = clamp(rearSlip * p.rearStiffness * rearMaxForce, -rearMaxForce, rearMaxForce);
+    const rearMaxForce = p.muRear * Nr * gripMul * handbrakeMul;
+
+    // Magnitude-only denominator (`speedEps`, not signed `vf`) so each
+    // tyre's slip angle stays a function of "how much is it scrubbing
+    // sideways relative to how fast it's rolling", which is symmetric in
+    // forward/reverse - the tyre doesn't care which way it's rolling, only
+    // how much it's sliding sideways while doing so, same as a shopping
+    // cart wheel rolls straight either direction until pushed sideways.
+    // (Using signed vf instead would swing the slip angle out toward
+    // +-pi/2 whenever reversing, which the tyre curve below reads as "way
+    // past peakSlip" and collapses to near-zero force - the opposite of
+    // what a sliding tyre should do.) No steer-direction or `dirSign`
+    // correction needed here either: `this.steerAngle` is the wheel's
+    // actual physical angle relative to the body, unaffected by which way
+    // the car happens to be travelling.
+    const speedEps = Math.abs(vf) + 0.4;
+    const frontSlip = this.steerAngle - Math.atan2(vs + this.yawRate * p.cgToFront, speedEps);
+    const rearSlip = -Math.atan2(vs - this.yawRate * p.cgToRear, speedEps);
+
+    const frontLatForce = tireLateralForce(frontSlip, frontMaxForce, p.frontPeakSlip);
+    const idealRearLat = tireLateralForce(rearSlip, rearMaxForce, p.rearPeakSlip);
+
+    // Friction circle on the driven axle: the engine's push and the tyre's
+    // lateral grip share one traction budget. Demanding more of both than
+    // `rearMaxForce` allows scales *both* down together - throttle
+    // mid-corner directly costs lateral grip as a physical consequence,
+    // not through a separate "wheelspin" formula.
+    let rearLongForce = engineForce;
+    let rearLatForce = idealRearLat;
+    const rearDemand = Math.hypot(rearLongForce, rearLatForce);
+    if (rearDemand > rearMaxForce && rearDemand > 1e-3) {
+      const scale = rearMaxForce / rearDemand;
+      rearLongForce *= scale;
+      rearLatForce *= scale;
+    }
 
     const yawTorque = frontLatForce * p.cgToFront - rearLatForce * p.cgToRear;
     this.yawRate += (yawTorque / p.inertia) * dt;
@@ -257,23 +481,52 @@ export class CarPhysics {
     // the original `yawRate *= 0.985` form loses ~60%/s at 60fps but only
     // ~26%/s at 20fps (same class of FPS-dependence bug as the steering
     // blend above, just easier to miss since nothing clamps it to 1).
-    this.yawRate *= Math.exp(-p.yawDampingRate * dt);
+    // Reversing with the front (steered) axle now trailing rather than
+    // leading is a real vehicle-dynamics effect, not a formula bug: a
+    // steered axle is self-centring/stabilising when it *leads* (forward
+    // driving) but behaves like a trailing caster when it's dragged behind
+    // instead - the same reason a shopping trolley's front wheels flutter
+    // when backed up, or a reversing trailer needs constant correction.
+    // Measured here (see CarPhysics.test.ts): holding the same steer input
+    // at a matched speed, coasting with zero other forces, rear slip angle
+    // climbs without settling in reverse while it saturates around 0.3 rad
+    // forward - confirmed present even with the slip-angle formulas above
+    // made fully direction-symmetric and weight transfer neutralised for
+    // reverse (see `brakeDecelForce` above), so it isn't an artefact of
+    // either of those. Real reverse gearing keeps this in check by simply
+    // not letting a car reverse anywhere near as fast as it drives forward
+    // (see `reverseTopSpeed`); this extra damping, active only while
+    // vf < 0, is the yaw-side equivalent - it doesn't touch forward
+    // handling at all (boost is exactly 1 there).
+    const reverseYawDampingBoost = vf < 0 ? 4 : 1;
+    this.yawRate *= Math.exp(-p.yawDampingRate * reverseYawDampingBoost * dt);
 
     // Drag acts on total speed, not just the forward component, so a car
     // sliding sideways still bleeds speed instead of coasting forever.
-    const totalSpeed = speedNow;
+    const totalSpeed = Math.hypot(vf, vs);
     const dragMag = p.dragCoeff * totalSpeed * totalSpeed;
     const dragVf = totalSpeed > 0.01 ? (-dragMag * vf) / totalSpeed : 0;
     const dragVs = totalSpeed > 0.01 ? (-dragMag * vs) / totalSpeed : 0;
 
-    const newVf = vf + (longAccel + dragVf / p.mass) * dt;
-    const newVs = vs + ((frontLatForce + rearLatForce) / p.mass + dragVs / p.mass) * dt;
+    // Integrate velocity directly in world space from local-frame forces
+    // resolved through the *current* heading's axes - NOT by recomputing
+    // (vf, vs) and re-expressing them through the *new*, post-rotation
+    // heading. That second approach silently rotates the velocity vector
+    // by however much yaw happened this step, regardless of whether any
+    // actual lateral force justified it: a car spinning fast on yaw torque
+    // alone would appear to carve a tight arc "for free", let it corner
+    // tighter than its own tyre grip could ever produce, and made the
+    // slip-angle/friction-circle work above nearly pointless (verified:
+    // with this bug, sustained ~4g cornering was reachable at rear slip
+    // angles under 0.03 rad, on a car whose tyres cap out under 1g).
+    // Newton's second law applies in world space; yaw is a separate,
+    // purely rotational update that changes orientation, not velocity.
+    const accelLocalF = (rearLongForce + brakeAndRollForce + dragVf) / p.mass;
+    const accelLocalS = (frontLatForce + rearLatForce + dragVs) / p.mass;
+    this.vx += (accelLocalF * fx + accelLocalS * rx) * dt;
+    this.vz += (accelLocalF * fz + accelLocalS * rz) * dt;
 
     this.heading += this.yawRate * dt;
-
-    const { fx: nfx, fz: nfz, rx: nrx, rz: nrz } = this.axes(this.heading);
-    this.vx = newVf * nfx + newVs * nrx;
-    this.vz = newVf * nfz + newVs * nrz;
 
     this.x += this.vx * dt;
     this.z += this.vz * dt;

@@ -15,15 +15,21 @@ export interface ChaseCameraParams {
   maxRoll: number;
 }
 
+// Pulled further back/up than the brief's original numbers - arcade
+// racers (Need for Speed, Forza Horizon) deliberately keep the chase cam
+// noticeably farther and higher than a "realistic" bumper-cam distance
+// would suggest, both for readability of what's ahead and because it
+// makes the car look more in-control/planted than a camera glued to the
+// bumper does.
 export const DEFAULT_CHASE_CAMERA_PARAMS: ChaseCameraParams = {
-  distanceBehind: 6,
-  heightAbove: 2.5,
+  distanceBehind: 9,
+  heightAbove: 3.6,
   followRate: 7,
   rotateRate: 3.5,
-  lookAheadDist: 4,
-  baseFov: 60,
-  fovSpeedFactor: 0.03,
-  maxFov: 75,
+  lookAheadDist: 6,
+  baseFov: 64,
+  fovSpeedFactor: 0.035,
+  maxFov: 82,
   maxRoll: (4 * Math.PI) / 180,
 };
 
@@ -42,6 +48,8 @@ export class ChaseCamera {
 
   private readonly desiredPos = new Vector3();
   private readonly desiredLookAt = new Vector3();
+  private readonly leadPosFollow = new Vector3();
+  private readonly leadPosLook = new Vector3();
 
   constructor(aspect: number, params: Partial<ChaseCameraParams> = {}) {
     this.params = { ...DEFAULT_CHASE_CAMERA_PARAMS, ...params };
@@ -51,7 +59,15 @@ export class ChaseCamera {
   /**
    * @param carPos world position of the car
    * @param carForwardX/Z unit forward vector of the car (XZ plane)
-   * @param speedMs current car speed, m/s
+   * @param carVelX/Z world-space velocity of the car, m/s (XZ plane) - used
+   *   to cancel the *steady-state* lag an exponential-decay follow always
+   *   has behind a constantly-moving target (lag = velocity / followRate;
+   *   at this game's ~50 m/s top speed and followRate=7 that's ~7m of
+   *   extra follow distance, enough to make the car look tiny and pinned
+   *   near the top of the frame - verified in-browser, not a hypothetical).
+   *   Adding velocity*leadTime to the target before smoothing toward it
+   *   cancels exactly that steady-state error for constant-velocity motion,
+   *   while leaving cornering/acceleration transients still smoothed.
    * @param slipAngle signed rear slip angle (radians), for the drift roll
    */
   update(
@@ -59,18 +75,21 @@ export class ChaseCamera {
     carPos: Vector3,
     carForwardX: number,
     carForwardZ: number,
-    speedMs: number,
+    carVelX: number,
+    carVelZ: number,
     slipAngle: number,
   ): void {
     const p = this.params;
 
+    this.leadPosFollow.set(carVelX, 0, carVelZ).multiplyScalar(1 / p.followRate).add(carPos);
     this.desiredPos
       .set(carForwardX, 0, carForwardZ)
       .multiplyScalar(-p.distanceBehind)
-      .add(carPos);
+      .add(this.leadPosFollow);
     this.desiredPos.y += p.heightAbove;
 
-    this.desiredLookAt.set(carForwardX, 0, carForwardZ).multiplyScalar(p.lookAheadDist).add(carPos);
+    this.leadPosLook.set(carVelX, 0, carVelZ).multiplyScalar(1 / p.rotateRate).add(carPos);
+    this.desiredLookAt.set(carForwardX, 0, carForwardZ).multiplyScalar(p.lookAheadDist).add(this.leadPosLook);
 
     if (!this.initialized) {
       this.camera.position.copy(this.desiredPos);
@@ -86,7 +105,7 @@ export class ChaseCamera {
 
     this.camera.lookAt(this.currentLookAt);
 
-    const speedKmh = speedMs * 3.6;
+    const speedKmh = Math.hypot(carVelX, carVelZ) * 3.6;
     this.camera.fov = Math.min(p.maxFov, p.baseFov + speedKmh * p.fovSpeedFactor);
     this.camera.updateProjectionMatrix();
 
