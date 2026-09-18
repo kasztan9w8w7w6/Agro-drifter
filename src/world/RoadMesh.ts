@@ -63,7 +63,19 @@ export function buildRoadSurfaceMesh(course: RoadCourse): Mesh {
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
-  const material = new MeshStandardMaterial({ color: Palette.asphalt });
+  // polygonOffset pushes this surface slightly toward the camera in
+  // depth-buffer space (not in world position) so it reliably wins the
+  // depth test against the ground plane sitting just 2cm underneath it -
+  // standard defence against z-fighting between two near-coplanar
+  // surfaces, cheap insurance given the retro pass's low internal
+  // resolution leaves less depth precision to work with than a normal
+  // render at the same distances.
+  const material = new MeshStandardMaterial({
+    color: Palette.asphalt,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
+  });
   return new Mesh(geometry, material);
 }
 
@@ -75,7 +87,15 @@ export function buildRoadCenterLine(course: RoadCourse): InstancedMesh {
   const count = Math.max(1, Math.floor(course.params.length / period));
 
   const geometry = new BoxGeometry(0.25, 0.03, dashLength);
-  const material = new MeshStandardMaterial({ color: Palette.roadLine });
+  // polygonOffset, not just the small world-space height gap, keeps these
+  // dashes from z-fighting the road surface right under them - same
+  // defensive reasoning as the road surface's own offset above.
+  const material = new MeshStandardMaterial({
+    color: Palette.roadLine,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
+  });
   const mesh = new InstancedMesh(geometry, material, count);
   mesh.instanceMatrix.setUsage(DynamicDrawUsage);
 
@@ -83,7 +103,7 @@ export function buildRoadCenterLine(course: RoadCourse): InstancedMesh {
   for (let i = 0; i < count; i++) {
     const z = course.params.length - i * period - dashLength / 2;
     const cx = course.centerXAt(z);
-    m.makeTranslation(cx, 0.02, z);
+    m.makeTranslation(cx, 0.05, z);
     mesh.setMatrixAt(i, m);
   }
   mesh.instanceMatrix.needsUpdate = true;

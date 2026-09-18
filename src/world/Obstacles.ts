@@ -100,7 +100,11 @@ export class ObstacleField {
       depthWrite: false,
     });
     const decal = new Mesh(decalGeo, decalMat);
-    decal.position.set(glassX, 0.015, glassZ);
+    // 0.05, not 0.015: same low-internal-resolution depth-precision issue
+    // as the ground/road pair and the centre-line dashes - too small a
+    // gap above the road surface still lets this decal z-fight it and
+    // flicker despite `depthWrite: false`.
+    decal.position.set(glassX, 0.05, glassZ);
     scene.add(decal);
   }
 

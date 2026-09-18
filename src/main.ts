@@ -1,5 +1,6 @@
 import {
   BoxGeometry,
+  Color,
   DirectionalLight,
   Fog,
   Group,
@@ -57,7 +58,7 @@ function buildGround(scene: Scene, course: RoadCourse): void {
     new MeshStandardMaterial({ color: Palette.grassMid }),
   );
   ground.rotation.x = -Math.PI / 2;
-  ground.position.set(0, -0.02, course.params.length / 2); // just under the road ribbon, avoids z-fighting
+  ground.position.set(0, -0.02, course.params.length / 2); // just under the road ribbon - polygonOffset on the road handles the z-fight, not this gap
   scene.add(ground);
 }
 
@@ -117,6 +118,17 @@ async function main(): Promise<void> {
 
   const scene = new Scene();
   scene.fog = new Fog(Palette.skyBottom, 40, 180);
+  // Explicit, not left to the renderer's default clear colour: empty sky
+  // (above the ground plane's silhouette, out to the far clip plane) was
+  // rendering as whatever the renderer clears to when nothing else says
+  // otherwise - normally close enough to this same dark navy to go
+  // unnoticed, but caught it flashing solid white for 1-2 frames during a
+  // plain, uneventful drive (no obstacle hit, no resize, nothing else
+  // happening) - exactly the kind of one-off a relied-on implicit default
+  // produces. Setting it directly makes the sky colour deterministic
+  // regardless of what the renderer or backend (WebGPU vs. its WebGL2
+  // fallback) does by default.
+  scene.background = new Color(Palette.skyBottom);
 
   const hemi = new HemisphereLight(Palette.skyTop, Palette.grassDark, 0.6);
   scene.add(hemi);
