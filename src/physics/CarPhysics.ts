@@ -240,21 +240,35 @@ export class CarPhysics {
     // demand, so trail-braking still shifts grip front/rear correctly.
     const engineForce = input.throttle > 0 ? input.throttle * p.enginePower : 0;
     let brakeAndRollForce = 0;
-    if (input.brake > 0) brakeAndRollForce -= input.brake * p.brakeForce * Math.sign(vf);
+    // This game has no separate reverse throttle - holding brake while
+    // already stopped (or already rolling backward) is how you reverse,
+    // same one-pedal convention as most arcade racers. So brake means two
+    // different things depending on vf's sign relative to a small rest
+    // band: decelerate current forward motion (REST_EPS < vf), or drive
+    // backward (vf <= REST_EPS). Only the deceleration case gets clamped
+    // to "at most enough force to bring vf to exactly zero this step" -
+    // a full, un-clamped brake force applied for a whole step can
+    // overshoot past vf=0 and land on the *other* side, and since that
+    // side used to ALSO try to decelerate (now back toward 0), it flips
+    // back next step, and so on: a fast, tiny sign-flipping oscillation
+    // in vf while held at a standstill (imperceptible on the car itself,
+    // a few mm of position noise per substep) that the chase camera's
+    // velocity-lead look-at target faithfully amplifies into a visible
+    // background shake, and that the retro pass's vertex snapping turns
+    // into flicker on thin/distant geometry. The reverse case is exempt
+    // from that clamp on purpose: it's *supposed* to keep pushing vf
+    // negative, not settle at zero - clamping it there silently disabled
+    // reversing entirely.
+    const REST_EPS = 0.05;
+    if (input.brake > 0) {
+      if (vf > REST_EPS) {
+        const maxStoppingForce = (vf * p.mass) / dt;
+        brakeAndRollForce -= Math.min(input.brake * p.brakeForce, maxStoppingForce);
+      } else {
+        brakeAndRollForce -= input.brake * p.brakeForce;
+      }
+    }
     if (Math.abs(vf) > 0.01) brakeAndRollForce -= p.rollResist * Math.sign(vf);
-    // Brake/roll always oppose vf, so their combined force can only ever
-    // slow the car down - but a big brake force applied for a whole step
-    // can overshoot past vf=0 and land on the *other* side, flipping
-    // Math.sign(vf) next step and pushing back the other way: a fast,
-    // tiny sign-flipping oscillation in vf while held at a standstill
-    // (imperceptible on the car itself, a few mm of position noise per
-    // substep) that the chase camera's velocity-lead look-at target
-    // faithfully amplifies into a visible background shake, and that the
-    // retro pass's vertex snapping turns into flicker on thin/distant
-    // geometry. Clamping to "at most enough force to bring vf to exactly
-    // zero this step" removes the overshoot at the source.
-    const maxStoppingForce = (Math.abs(vf) * p.mass) / dt;
-    brakeAndRollForce = clamp(brakeAndRollForce, -maxStoppingForce, maxStoppingForce);
 
     const wheelBase = p.cgToFront + p.cgToRear;
     const staticNf = (p.mass * p.gravity * p.cgToRear) / wheelBase;

@@ -226,25 +226,44 @@ describe("friction circle: throttle mid-corner costs lateral grip (not an arbitr
 });
 
 describe("braking at a standstill (regression - held brake once made the car chatter in place)", () => {
-  it("holding the brake once fully stopped never re-launches the car in either direction", () => {
+  it("brake decelerates forward motion smoothly to a stop, then reverses without oscillating at the crossover", () => {
     // Caught from a player report of the *background* shaking whenever the
     // car came to a stop: brakeAndRollForce used to pick its direction from
     // Math.sign(vf || 1), a strong force with no limit on how far past
-    // vf=0 it could push in a single (sub)step. At a standstill that
-    // overshoot flips the sign next step, which overshoots back, forever -
+    // vf=0 it could push in a single (sub)step. Right at a standstill that
+    // overshoot flipped the sign next step, which overshot back, forever -
     // a fast, tiny (sub-mm) oscillation in vf that's invisible on the car
     // itself but that the chase camera's velocity-lead look-at target (and
     // the retro pass's vertex snapping on top of that) turns into a
     // visible shake/flicker of everything else on screen.
+    //
+    // This game has no separate reverse throttle - holding brake once
+    // essentially stopped is how you reverse - so the fix has to still let
+    // speed climb smoothly *through* zero into reverse, just without ever
+    // ticking back the *other* way once it's past. Sampled every frame
+    // through the whole braking run (not a guessed frame count for "now
+    // it's stopped, now it's reversing") so both halves get checked
+    // however many frames each actually takes.
     const car = new CarPhysics();
     const dt = 1 / 60;
     for (let i = 0; i < 120; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
-    for (let i = 0; i < 240; i++) car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
-    expect(car.speed).toBeLessThan(0.05);
 
-    for (let i = 0; i < 60; i++) {
+    let prevVz = car.velocityZ; // starts negative (moving forward, heading 0)
+    let sawNearStop = false;
+    let sawReverse = false;
+    for (let i = 0; i < 300; i++) {
       car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
-      expect(car.speed).toBeLessThan(0.05);
+      // velocityZ must never increase (go back toward negative/forward)
+      // once braking - it should decelerate toward zero, then keep
+      // climbing into positive (reverse) territory, monotonically the
+      // whole way. A real oscillation would show up here as a step back
+      // down after a step up.
+      expect(car.velocityZ).toBeGreaterThanOrEqual(prevVz - 1e-6);
+      prevVz = car.velocityZ;
+      if (Math.abs(car.velocityZ) < 0.05) sawNearStop = true;
+      if (car.velocityZ > 0.5) sawReverse = true;
     }
+    expect(sawNearStop).toBe(true);
+    expect(sawReverse).toBe(true);
   });
 });
