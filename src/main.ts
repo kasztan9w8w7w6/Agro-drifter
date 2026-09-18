@@ -139,7 +139,18 @@ async function main(): Promise<void> {
   const savePoi: MinimapPoi = { ...savePoint.position, color: toCss(Palette.neonToxic) };
   const minimap = new Minimap(course, [deerPoi, glassPoi, savePoi], appEl);
 
-  const car = await loadModel("assets/models/car.glb", buildCarPlaceholder);
+  const carVisual = await loadModel("assets/models/car.glb", buildCarPlaceholder);
+  if (!carVisual.userData.isPlaceholder) {
+    // The uploaded Fiat 126p model's own hood faces local +Z - confirmed by
+    // rendering it in profile from a fixed side camera (bypassing the chase
+    // cam) at heading 0: the sloped hood/fender sat on the world +Z side,
+    // opposite this engine's -Z-front convention. Without this, the car
+    // drives "tyłem" - trunk leading, headlight/look-ahead logic aimed at
+    // what is visually the back of the car.
+    carVisual.rotation.y = Math.PI;
+  }
+  const car = new Group();
+  car.add(carVisual);
   scene.add(car);
 
   const headlight = new PointLight(Palette.headlightWarm, 8, 20);
@@ -148,16 +159,19 @@ async function main(): Promise<void> {
 
   const chaseCamera = new ChaseCamera(window.innerWidth / window.innerHeight);
 
-  // 0.4, not the brief's suggested 0.28: at 0.28 with the camera pulled back
-  // far enough for a proper chase view, RetroPassNode's vertex-snapping
-  // (it rounds each vertex's projected position to the low-res pixel grid)
+  // Not the brief's suggested 0.28: at 0.28 with the camera pulled back far
+  // enough for a proper chase view, RetroPassNode's vertex-snapping (it
+  // rounds each vertex's projected position to the low-res pixel grid)
   // occasionally rounds every vertex of a small/distant object to the same
   // point, collapsing it to zero area - the car would fully vanish at
-  // specific camera distances. Verified: reproduced reliably at
-  // distanceBehind=9/heightAbove=3.6 with scale 0.28 (car invisible for the
-  // entire time it held that position), gone at scale 0.4 with the same
-  // camera settings and across a full varied drive (turns, drift, reverse).
-  const retro = await createRetroRenderer(appEl, scene, chaseCamera.camera, 0.4);
+  // specific camera distances. 0.4 fixed that for the car, but real,
+  // finely-detailed tree/road geometry (thin leaf cards, a narrow dashed
+  // centre line) is far more collapse-prone than the car's own chunky
+  // placeholder ever was - at 0.4 it still flickered in and out as the
+  // camera moved. 0.6 gives that thinner geometry enough pixel-grid
+  // resolution to stay stable across a full varied drive while still
+  // reading as a low-res retro look, not a smooth modern one.
+  const retro = await createRetroRenderer(appEl, scene, chaseCamera.camera, 0.6);
   retro.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
   retro.setSize(window.innerWidth, window.innerHeight);
   document.body.style.background = toCss(Palette.skyBottom);
@@ -214,6 +228,7 @@ async function main(): Promise<void> {
 
     const forwardX = -Math.sin(physics.heading);
     const forwardZ = -Math.cos(physics.heading);
+
     chaseCamera.update(dt, car.position, forwardX, forwardZ, physics.velocityX, physics.velocityZ, physics.slipAngle);
 
     radio.setMood({

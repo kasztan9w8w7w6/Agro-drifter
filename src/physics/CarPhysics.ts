@@ -240,8 +240,21 @@ export class CarPhysics {
     // demand, so trail-braking still shifts grip front/rear correctly.
     const engineForce = input.throttle > 0 ? input.throttle * p.enginePower : 0;
     let brakeAndRollForce = 0;
-    if (input.brake > 0) brakeAndRollForce -= input.brake * p.brakeForce * Math.sign(vf || 1);
+    if (input.brake > 0) brakeAndRollForce -= input.brake * p.brakeForce * Math.sign(vf);
     if (Math.abs(vf) > 0.01) brakeAndRollForce -= p.rollResist * Math.sign(vf);
+    // Brake/roll always oppose vf, so their combined force can only ever
+    // slow the car down - but a big brake force applied for a whole step
+    // can overshoot past vf=0 and land on the *other* side, flipping
+    // Math.sign(vf) next step and pushing back the other way: a fast,
+    // tiny sign-flipping oscillation in vf while held at a standstill
+    // (imperceptible on the car itself, a few mm of position noise per
+    // substep) that the chase camera's velocity-lead look-at target
+    // faithfully amplifies into a visible background shake, and that the
+    // retro pass's vertex snapping turns into flicker on thin/distant
+    // geometry. Clamping to "at most enough force to bring vf to exactly
+    // zero this step" removes the overshoot at the source.
+    const maxStoppingForce = (Math.abs(vf) * p.mass) / dt;
+    brakeAndRollForce = clamp(brakeAndRollForce, -maxStoppingForce, maxStoppingForce);
 
     const wheelBase = p.cgToFront + p.cgToRear;
     const staticNf = (p.mass * p.gravity * p.cgToRear) / wheelBase;

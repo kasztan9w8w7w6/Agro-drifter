@@ -224,3 +224,27 @@ describe("friction circle: throttle mid-corner costs lateral grip (not an arbitr
     expect(deltaWithThrottle).toBeGreaterThan(deltaCoasting);
   });
 });
+
+describe("braking at a standstill (regression - held brake once made the car chatter in place)", () => {
+  it("holding the brake once fully stopped never re-launches the car in either direction", () => {
+    // Caught from a player report of the *background* shaking whenever the
+    // car came to a stop: brakeAndRollForce used to pick its direction from
+    // Math.sign(vf || 1), a strong force with no limit on how far past
+    // vf=0 it could push in a single (sub)step. At a standstill that
+    // overshoot flips the sign next step, which overshoots back, forever -
+    // a fast, tiny (sub-mm) oscillation in vf that's invisible on the car
+    // itself but that the chase camera's velocity-lead look-at target (and
+    // the retro pass's vertex snapping on top of that) turns into a
+    // visible shake/flicker of everything else on screen.
+    const car = new CarPhysics();
+    const dt = 1 / 60;
+    for (let i = 0; i < 120; i++) car.update(dt, { throttle: 1, brake: 0, steer: 0, handbrake: 0 }, "asphalt");
+    for (let i = 0; i < 240; i++) car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
+    expect(car.speed).toBeLessThan(0.05);
+
+    for (let i = 0; i < 60; i++) {
+      car.update(dt, { throttle: 0, brake: 1, steer: 0, handbrake: 0 }, "asphalt");
+      expect(car.speed).toBeLessThan(0.05);
+    }
+  });
+});
