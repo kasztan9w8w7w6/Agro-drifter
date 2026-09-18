@@ -23,10 +23,16 @@ sterowania - zanim dołączą realne assety, droga i świat.
   (`1 - exp(-rate*dt)`), look-ahead, FOV pump przy prędkości i lekki roll
   proporcjonalny do kąta poślizgu podczas driftu.
 - Fizyka driftu (bicycle model z nasycającą się siłą boczną opony,
-  przeniesiony na płaszczyznę XZ świata 3D), z testami headless (brak
-  NaN/eksplozji prędkości w losowej jazdie, auto realnie zwalnia i
-  prostuje się po puszczeniu wejść, sterowanie w lewo/prawo daje przeciwny
-  znak skrętu).
+  przeniesiony na płaszczyznę XZ świata 3D), z pakietem testów w `npm test`
+  (Vitest): brak NaN/eksplozji prędkości w losowej jazdie, zachowanie
+  niezależne od FPS (fizyka wewnętrznie dzieli krok na podkroki - patrz
+  `MAX_SUBSTEP_DT`), auto realnie zwalnia i prostuje się po puszczeniu
+  wejść, oraz regresyjny test kierunku skrętu zweryfikowany względem
+  rzeczywistej macierzy `lookAt` z Three.js (nie "na oko").
+- Drift osiągalny dwiema drogami: hamulcem ręcznym (mocny, szybki) i samym
+  gazem + ostrym skrętem przy prędkości ("power oversteer", parametr
+  `powerOversteerFactor` per auto - im wyższy, tym łatwiej auto się urywa
+  z tyłu bez ręcznego).
 - Jedna abstrakcja wejścia (`{throttle, brake, steer, handbrake}`) wspólna
   dla klawiatury i dotyku - fizyka nie wie, z jakiego źródła pochodzi input.
 - Płaska płaszczyzna testowa z prostymi obiektami-znacznikami (bez drogi,
@@ -49,6 +55,7 @@ multiplayer.
 npm install
 npm run dev      # tryb deweloperski
 npm run build    # build produkcyjny do dist/
+npm test         # testy fizyki (Vitest)
 ```
 
 ## Sterowanie

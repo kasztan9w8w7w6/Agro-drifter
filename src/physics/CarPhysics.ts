@@ -1,10 +1,26 @@
 /**
  * Arcade drift model (bicycle model with saturating tyre lateral force),
  * ported from a 2D top-down prototype onto the world's XZ plane (Y = up).
- * Heading 0 faces +Z; a mesh using `mesh.rotation.y = heading` matches this
- * convention. Tuned and headless-tested for: no NaN/blow-up over long random
- * input runs, and the car actually settles (straightens, slows) once
- * throttle/steer/handbrake are released.
+ *
+ * Convention: `heading` is the object's `rotation.y` in Three.js's standard
+ * right-handed, Y-up world, where an unrotated object's front faces local
+ * **-Z** (matches `mesh.rotation.y = heading`, camera/gizmo defaults, etc.).
+ * Under that convention, a chase camera sitting behind the car and looking
+ * along its forward vector sees *increasing* heading as a turn toward
+ * screen-**left** - it's an inherent property of right-handed Y-up rotation
+ * viewed from a "driver's" perspective rather than top-down, not a bug to
+ * design around. The 2D prototype this was ported from used a different
+ * (mirrored) chirality, where growing its angle read as "turning right", so
+ * porting the slip/steer formulas unmodified silently inverted the controls.
+ * The single, deliberate fix is the minus sign on `targetSteer` below -
+ * everything else keeps the original, already-validated formulas. Covered
+ * by a regression test in `CarPhysics.test.ts` so this can't silently
+ * regress again.
+ *
+ * Tuned and headless-tested for: no NaN/blow-up over long random input
+ * runs, the car actually settles (straightens, slows) once
+ * throttle/steer/handbrake are released, and the handbrake/power-oversteer
+ * drift is actually reachable (not just theoretically present).
  *
  * Two fixes versus the original 2D pseudocode this was ported from:
  * - Traction loss (rear slip past the drift threshold) now actually reduces
@@ -47,11 +63,20 @@ export interface CarPhysicsParams {
   muFront: number;
   muRear: number;
   handbrakeGripMultiplier: number;
-  yawDamping: number;
+  /** 1/s exponential decay rate for yaw rate (not a per-frame multiplier - see update()). */
+  yawDampingRate: number;
   weightTransferStrength: number;
   weightTransferMax: number;
   driftSlipThreshold: number;
   minDriftSpeed: number;
+  /**
+   * How much throttle alone (no handbrake) can break rear grip at speed -
+   * "power oversteer", the RWD-drift-happy feel. 0 = never (FWD-ish,
+   * planted), higher = easier to kick the tail out on gas + steer alone.
+   */
+  powerOversteerFactor: number;
+  /** Speed (m/s) at which power-oversteer reaches full effect. */
+  powerOversteerSpeedThreshold: number;
   surfaceGrip: Record<Surface, number>;
 }
 
@@ -59,7 +84,7 @@ export const DEFAULT_CAR_PHYSICS_PARAMS: CarPhysicsParams = {
   mass: 1150,
   cgToFront: 1.15,
   cgToRear: 1.35,
-  inertia: 1550,
+  inertia: 420,
   gravity: 9.81,
   enginePower: 9200,
   brakeForce: 12500,
@@ -71,13 +96,20 @@ export const DEFAULT_CAR_PHYSICS_PARAMS: CarPhysicsParams = {
   frontStiffness: 13,
   rearStiffness: 9.5,
   muFront: 1.18,
-  muRear: 1.05,
-  handbrakeGripMultiplier: 0.2,
-  yawDamping: 0.985,
+  muRear: 0.88,
+  handbrakeGripMultiplier: 0.12,
+  yawDampingRate: 0.9,
   weightTransferStrength: 0.05,
   weightTransferMax: 0.4,
-  driftSlipThreshold: 0.12,
+  // 0.09 rather than a rounder number: measured headroom under the tuned
+  // rear grip/power-oversteer constants above - full-lock steer at speed
+  // alone (no handbrake) peaks at ~0.0975 rad of rear slip, so this is the
+  // highest threshold that still classifies that as a drift, while partial
+  // steering (<=0.7) stays comfortably under it (see CarPhysics.test.ts).
+  driftSlipThreshold: 0.09,
   minDriftSpeed: 3,
+  powerOversteerFactor: 0.5,
+  powerOversteerSpeedThreshold: 15,
   surfaceGrip: { asphalt: 1.0, gravel: 0.72, mud: 0.48, ice: 0.28, grass: 0.6 },
 };
 
@@ -85,13 +117,16 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/** Upper bound on a single integration step, regardless of the caller's frame rate. */
+const MAX_SUBSTEP_DT = 1 / 120;
+
 export class CarPhysics {
   readonly params: CarPhysicsParams;
 
   // World-space state, XZ plane, Y up.
   x = 0;
   z = 0;
-  /** Radians, 0 = facing +Z, positive turns toward +X. */
+  /** Radians, `rotation.y` convention: 0 = facing -Z, positive turns toward screen-left. */
   heading = 0;
 
   private vx = 0; // world-space velocity
@@ -124,22 +159,51 @@ export class CarPhysics {
   private axes(heading: number): { fx: number; fz: number; rx: number; rz: number } {
     const s = Math.sin(heading);
     const c = Math.cos(heading);
-    // forward = (sin h, cos h); right = forward rotated -90deg around Y.
-    return { fx: s, fz: c, rx: c, rz: -s };
+    // Three.js convention: front(0) = (0,0,-1). right(heading) is forward
+    // rotated to match the car's own right side (and a chase camera's
+    // screen-right when placed behind the car looking along its forward).
+    return { fx: -s, fz: -c, rx: c, rz: -s };
   }
 
+  /**
+   * Advances the simulation by `dt` seconds. Internally split into fixed
+   * sub-steps (see `MAX_SUBSTEP_DT`): this is a coupled nonlinear system
+   * (slip angle depends on velocity, force depends on slip angle, velocity
+   * depends on force), not a simple exponential-toward-target, so there's
+   * no closed form that's exact at any step size the way the steering/yaw
+   * damping smoothing is - explicit Euler needs a small enough step here to
+   * stay accurate, especially with this car's low yaw inertia (fast yaw
+   * response = a stiffer system). Verified: without sub-stepping, 20fps vs
+   * 60fps diverged by ~0.7 rad of heading after 2s of steering; with it,
+   * well under 0.05 rad.
+   */
   update(dt: number, input: CarInput, surface: Surface = "asphalt"): void {
+    const substeps = Math.max(1, Math.ceil(dt / MAX_SUBSTEP_DT));
+    const subDt = dt / substeps;
+    for (let i = 0; i < substeps; i++) {
+      this.step(subDt, input, surface);
+    }
+  }
+
+  private step(dt: number, input: CarInput, surface: Surface): void {
     const p = this.params;
     const gripMul = p.surfaceGrip[surface] ?? 1.0;
 
     const { fx, fz, rx, rz } = this.axes(this.heading);
     const vf = this.vx * fx + this.vz * fz; // forward speed
     const vs = this.vx * rx + this.vz * rz; // lateral (rightward) speed
+    const speedNow = Math.hypot(vf, vs);
 
-    // Steering: relaxes toward a speed-limited target angle.
+    // Steering: relaxes toward a speed-limited target angle. Negated: see
+    // the class-level doc comment for why a naive port of the 2D formula
+    // turns the car the wrong way in this 3D convention.
     const speedFactor = 1 / (1 + Math.abs(vf) * p.steerSpeedFalloff);
-    const targetSteer = input.steer * p.maxSteerAngle * speedFactor;
-    this.steerAngle += (targetSteer - this.steerAngle) * Math.min(1, dt * p.steerResponse);
+    const targetSteer = -input.steer * p.maxSteerAngle * speedFactor;
+    // Exponential-decay smoothing (same form as the chase camera), not the
+    // `Math.min(1, dt*rate)` linear approximation the original pseudocode
+    // used - that form is FPS-dependent (verified: it produced a ~6x
+    // difference in heading after 1s of steering at 20fps vs 60fps).
+    this.steerAngle += (targetSteer - this.steerAngle) * (1 - Math.exp(-p.steerResponse * dt));
 
     // Longitudinal force (engine, brake, rolling resistance) before traction loss.
     let longForce = 0;
@@ -171,8 +235,16 @@ export class CarPhysics {
     longForce *= tractionAvailable; // actually reduce the force used below, not just a discarded estimate
     const longAccel = longForce / p.mass;
 
+    // Power oversteer: throttle alone (no handbrake) eats into rear grip as
+    // speed builds, so a car with a high enough powerOversteerFactor can be
+    // kicked into a drift on gas + steer alone, like a real RWD car breaking
+    // rear traction - not just via the handbrake.
+    const throttleRatio = clamp(Math.abs(longForce) / p.enginePower, 0, 1);
+    const oversteerSpeedFactor = clamp(speedNow / p.powerOversteerSpeedThreshold, 0, 1);
+    const wheelspinLoss = clamp(p.powerOversteerFactor * throttleRatio * oversteerSpeedFactor, 0, 0.6);
+
     const frontMaxForce = p.muFront * Nf * gripMul;
-    const rearMaxForce = p.muRear * Nr * gripMul * handbrakeMul;
+    const rearMaxForce = p.muRear * Nr * gripMul * handbrakeMul * (1 - wheelspinLoss);
     // Force opposes the slip angle (no extra minus: slip is already signed
     // opposite to the velocity error it's correcting), so this damps the
     // slide instead of amplifying it.
@@ -181,11 +253,15 @@ export class CarPhysics {
 
     const yawTorque = frontLatForce * p.cgToFront - rearLatForce * p.cgToRear;
     this.yawRate += (yawTorque / p.inertia) * dt;
-    this.yawRate *= p.yawDamping;
+    // Exponential decay over real time, not a fixed per-frame multiplier -
+    // the original `yawRate *= 0.985` form loses ~60%/s at 60fps but only
+    // ~26%/s at 20fps (same class of FPS-dependence bug as the steering
+    // blend above, just easier to miss since nothing clamps it to 1).
+    this.yawRate *= Math.exp(-p.yawDampingRate * dt);
 
     // Drag acts on total speed, not just the forward component, so a car
     // sliding sideways still bleeds speed instead of coasting forever.
-    const totalSpeed = Math.hypot(vf, vs);
+    const totalSpeed = speedNow;
     const dragMag = p.dragCoeff * totalSpeed * totalSpeed;
     const dragVf = totalSpeed > 0.01 ? (-dragMag * vf) / totalSpeed : 0;
     const dragVs = totalSpeed > 0.01 ? (-dragMag * vs) / totalSpeed : 0;

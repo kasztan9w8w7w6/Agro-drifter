@@ -37,7 +37,7 @@ function buildPlaceholderCar(): Group {
     new BoxGeometry(1.1, 0.6, 0.6),
     new MeshStandardMaterial({ color: Palette.carGlass }),
   );
-  nose.position.set(0, 0.65, 2.1); // heading 0 = +Z, so the nose marks "front"
+  nose.position.set(0, 0.65, -2.1); // heading 0 = -Z (Three.js convention), so the nose marks "front"
   group.add(nose);
 
   return group;
@@ -99,7 +99,7 @@ async function main(): Promise<void> {
 
   const headlight = new PointLight(Palette.headlightWarm, 8, 20);
   car.add(headlight);
-  headlight.position.set(0, 0.7, 2.5);
+  headlight.position.set(0, 0.7, -2.5);
 
   const chaseCamera = new ChaseCamera(window.innerWidth / window.innerHeight);
 
@@ -131,8 +131,8 @@ async function main(): Promise<void> {
     car.position.set(physics.x, 0, physics.z);
     car.rotation.y = physics.heading;
 
-    const forwardX = Math.sin(physics.heading);
-    const forwardZ = Math.cos(physics.heading);
+    const forwardX = -Math.sin(physics.heading);
+    const forwardZ = -Math.cos(physics.heading);
     chaseCamera.update(dt, car.position, forwardX, forwardZ, physics.speed, physics.slipAngle);
 
     retro.render();
