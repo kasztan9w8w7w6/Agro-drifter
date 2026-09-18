@@ -1,40 +1,47 @@
 # Agro Drifter
 
-Pixelartowa gra jazdy/driftu z polskim, nocnym, groteskowym klimatem: driftujesz
-przez wieś i blokowisko, unikając sarn, potłuczonych butelek i dziur w drodze,
-aż dotrzesz do stacji paliw, gdzie gra się zapisuje.
+Gra jazdy/driftu z polskim, nocnym, groteskowym klimatem: driftujesz przez
+wieś i blokowisko, unikając sarn, potłuczonych butelek i dziur w drodze, aż
+dotrzesz do stacji paliw, gdzie gra się zapisuje.
 
 **Gra na żywo: https://kasztan9w8w7w6.github.io/Agro-drifter/**
 
-## Zaimplementowane
+## W trakcie przepisywania na pełne 3D
 
-- Arcade'owa fizyka driftu ze ślizgiem opartym o kąt poślizgu: hamulec ręczny
-  daje natychmiastowy "kick" zawiasu (jak prawdziwy handbrake turn), zjazd na
-  pobocze drastycznie ogranicza przyczepność, uszkodzenia auta pogarszają
-  prowadzenie.
-- Trudność rośnie wzdłuż trasy: droga zwęża się i mocniej się kręci, a
-  przeszkody gęstnieją im bliżej stacji.
-- Jedna testowa mapa: kręta droga przez wieś/blokowisko, noc, latarnie z
-  poświatą, reflektory auta, delikatny vignette + scanline (klimat retro-CRT).
-- Przeszkody: sarna, rozbita butelka (osłabia przyczepność), dziura (spowalnia) -
-  każda z iskrami i shakiem kamery przy zderzeniu.
-- Dym spod opon i ślady driftu zostające na asfalcie, popup "DRYF! +metry".
-- Wskaźnik paliwa (spada wraz z dystansem - sygnalizuje zbliżający się koniec
-  poziomu) i pasek uszkodzeń auta.
-- Stacja paliw jako save point: dokowanie auta, pixelowa animacja tankowania
-  (obracająca się "beczka" jako uproszczone 3D), zapis do `localStorage`.
-- Dynamiczna muzyka generowana na żywo: melancholijny pad w tonacji molowej +
-  mocno przesterowany sub-bas, reagujące na prędkość/drift/zagrożenie (niskie
-  paliwo, uszkodzenia).
-- Dźwięki silnika i kolizji syntezowane na żywo (Web Audio API) - bez plików audio.
-- Sterowanie dotykowe (wirtualne przyciski) na telefonie, zablokowany
-  scroll/zoom strony podczas gry.
-- Wszystkie sprite'y generowane proceduralnie (canvas) jako placeholdery -
-  auta mają fikcyjne, nielicencjonowane wyglądy.
+Projekt jest w trakcie przechodzenia z prototypu 2D (Phaser/canvas) na pełne
+3D w Three.js z estetyką PS1 (patrz techniczny brief w historii projektu).
+To jest **Sesja 1** tego przepisu: fundament renderowania, kamery, fizyki i
+sterowania - zanim dołączą realne assety, droga i świat.
+
+### Zaimplementowane (Sesja 1)
+
+- `WebGPURenderer` z automatycznym fallbackiem do WebGL2 (wbudowany w
+  Three.js) + `RetroPassNode` jako pipeline post-processingu: vertex
+  snapping, affine texture mapping, niska rozdzielczość wewnętrzna z
+  nearest-neighbor filtering - klimat PS1 bez pisania własnego shadera.
+- Kamera "chase cam" za autem z tłumieniem niezależnym od FPS
+  (`1 - exp(-rate*dt)`), look-ahead, FOV pump przy prędkości i lekki roll
+  proporcjonalny do kąta poślizgu podczas driftu.
+- Fizyka driftu (bicycle model z nasycającą się siłą boczną opony,
+  przeniesiony na płaszczyznę XZ świata 3D), z testami headless (brak
+  NaN/eksplozji prędkości w losowej jazdie, auto realnie zwalnia i
+  prostuje się po puszczeniu wejść, sterowanie w lewo/prawo daje przeciwny
+  znak skrętu).
+- Jedna abstrakcja wejścia (`{throttle, brake, steer, handbrake}`) wspólna
+  dla klawiatury i dotyku - fizyka nie wie, z jakiego źródła pochodzi input.
+- Płaska płaszczyzna testowa z prostymi obiektami-znacznikami (bez drogi,
+  przeszkód i realnych modeli - to kolejne kroki przepisu).
 - Automatyczny deploy na GitHub Pages przy pushu do `main`.
 
-Świadomie odłożone na później: wiele map, tuning/personalizacja aut, ekonomia
-i odblokowywanie, prawdziwe nagrania audio, cykl dnia/nocy, multiplayer.
+Kod poprzedniego prototypu 2D (audio syntezowane na żywo, zapis do
+`localStorage`, generowane proceduralnie sprite'y) częściowo pozostaje w
+repo (`src/audio`, `src/save.ts`, `src/palette.ts`) do ponownego podłączenia
+w kolejnych sesjach przepisu (radio, save-pointy) - obecnie jeszcze
+niepodłączony do nowej pętli gry.
+
+Świadomie odłożone na później: realne assety CC0 (Kenney/itch.io), droga i
+świat, przeszkody, radio, save-pointy, wiele map, tuning/personalizacja aut,
+multiplayer.
 
 ## Uruchomienie
 
@@ -46,8 +53,7 @@ npm run build    # build produkcyjny do dist/
 
 ## Sterowanie
 
-- `W`/`↑` - gaz, `S`/`↓` - hamulec/wsteczny
+- `W`/`↑` - gaz, `S`/`↓` - hamulec (przytrzymany na stojącym aucie = wsteczny)
 - `A`/`←`, `D`/`→` - skręt
-- `Spacja` - hamulec ręczny (drift, tapnięcie w trakcie skrętu = kick)
-- `R` - restart po dojechaniu do stacji i zapisaniu gry
+- `Spacja` - hamulec ręczny (drift)
 - Na telefonie: wirtualne przyciski w rogach ekranu.
